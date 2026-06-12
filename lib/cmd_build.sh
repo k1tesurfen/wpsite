@@ -20,11 +20,64 @@ _wp_image_tag() { # wp_version php_version
   fi
 }
 
+# First available system font for placeholder labels (empty = none → no text).
+# ImageMagick on macOS has no default font configured, so we must pass one.
+_placeholder_font() {
+  local f
+  for f in /System/Library/Fonts/Supplemental/Arial.ttf \
+           /System/Library/Fonts/Helvetica.ttc \
+           /System/Library/Fonts/Menlo.ttc \
+           /Library/Fonts/Arial.ttf; do
+    [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+  done
+}
+
+# Draw a labelled placeholder image at EXACT WxH: light-grey fill, a visible frame
+# (so it doesn't vanish on a white/SVG background — the whole point), and centered
+# filename + dimensions when there's room. Long names are middle-truncated.
+_image_placeholder() { # im width height out font
+  local im="$1" W="$2" H="$3" out="$4" font="${5:-}"
+  local c_border='#9aa0a6' c_fill='#e9e9ec' c_text='#5f6368'
+  local mind=$(( W < H ? W : H ))
+
+  # Too small to frame meaningfully: solid grey swatch.
+  if [ "$mind" -lt 8 ]; then
+    "$im" -size "${W}x${H}" "xc:$c_border" "$out" >/dev/null 2>&1
+    return
+  fi
+
+  # Border thickness scales with size. Tune via DIV (smaller = thicker), FLOOR, CAP.
+  local div=45 floor=6 cap=24
+  local b=$(( mind / div ))
+  [ "$b" -lt "$floor" ] && b="$floor"
+  [ "$b" -gt "$cap" ] && b="$cap"
+  local maxb=$(( (mind - 2) / 3 )); [ "$b" -gt "$maxb" ] && b="$maxb"
+  [ "$b" -lt 1 ] && b=1
+
+  # Solid border canvas, then fill the interior — an EXACT b-px border, no fuzz.
+  local args=( -size "${W}x${H}" "xc:$c_border"
+               -fill "$c_fill" -draw "rectangle $b,$b $((W-1-b)),$((H-1-b))" )
+  if [ -n "$font" ] && [ "$W" -ge 90 ] && [ "$H" -ge 44 ]; then
+    local name="${out##*/}" ps=$(( mind / 9 ))
+    [ "$ps" -lt 11 ] && ps=11
+    [ "$ps" -gt 28 ] && ps=28
+    local maxc=$(( W * 9 / (ps * 5) ))      # rough chars that fit at this size
+    if [ "${#name}" -gt "$maxc" ] && [ "$maxc" -ge 9 ]; then
+      local keep=$(( (maxc - 1) / 2 ))
+      name="${name:0:keep}…${name:$(( ${#name} - keep ))}"
+    fi
+    args+=( -font "$font" -fill "$c_text" -pointsize "$ps" -gravity center
+            -annotate "+0-$(( ps * 7 / 10 ))" "$name"
+            -annotate "+0+$(( ps * 7 / 10 ))" "${W} x ${H}" )
+  fi
+  "$im" "${args[@]}" "$out" >/dev/null 2>&1
+}
+
 # Generate one placeholder file. Returns non-zero on failure (caller tolerates it).
 # Paths in media_map are relative to the WP root (wp-content/uploads/...), so the
 # caller must run from the docker dir — NOT from inside uploads, or paths nest.
-_gen_placeholder() { # filepath width height im
-  local filepath="$1" width="$2" height="$3" im="$4" ext
+_gen_placeholder() { # filepath width height im font
+  local filepath="$1" width="$2" height="$3" im="$4" font="${5:-}" ext
   mkdir -p "$(dirname "$filepath")" || return 1
   ext="$(printf '%s' "${filepath##*.}" | tr '[:upper:]' '[:lower:]')"
 
@@ -44,34 +97,58 @@ _gen_placeholder() { # filepath width height im
       ffmpeg -f lavfi -i "color=c=black:s=${width}x${height}:d=1" \
         -c:v "$vcodec" -pix_fmt yuv420p "$filepath" -y >/dev/null 2>&1 || return 1 ;;
     *)
-      "$im" -size "${width}x${height}" xc:white "$filepath" >/dev/null 2>&1 || return 1 ;;
+      _image_placeholder "$im" "$width" "$height" "$filepath" "$font" || return 1 ;;
   esac
   return 0
 }
 
-# Regenerate uploads as blank, layout-accurate placeholders from media_map.txt.
-# A single bad asset warns and is skipped — it never aborts the whole run.
+# One worker stripe: process every Nth line of the map (offset k of n). Runs in a
+# subshell, so it inherits _gen_placeholder/_image_placeholder and $im/$font with
+# no exporting. Failures are appended to its own file (no cross-stripe contention).
+_rebuild_stripe() { # map n k im font failfile
+  local map="$1" n="$2" k="$3" im="$4" font="$5" failfile="$6"
+  local filepath width height
+  awk -v n="$n" -v k="$k" 'NR % n == k' "$map" \
+  | while IFS='|' read -r filepath width height; do
+      [ -z "$filepath" ] && continue
+      _gen_placeholder "$filepath" "$width" "$height" "$im" "$font" \
+        || printf '%s\n' "$filepath" >> "$failfile"
+    done
+}
+
+# Regenerate uploads as blank, layout-accurate placeholders from media_map.txt,
+# parallelised across CPU cores. A failed asset is recorded and skipped — it never
+# aborts the run.
 _rebuild_media() { # media_map_file im_convert
   local map="$1" im="$2"
   [ -f "$map" ] || return 0
-  local total done=0 failed=0
+  local total font jobs
   total="$(grep -c . "$map" 2>/dev/null || echo 0)"
-  log_info "Generating $total placeholder asset(s)..."
-  local filepath width height
-  while IFS='|' read -r filepath width height; do
-    [ -z "$filepath" ] && continue
-    if ! _gen_placeholder "$filepath" "$width" "$height" "$im"; then
-      failed=$((failed + 1))
-      log_warn "  skipped (generation failed): $filepath"
-    fi
-    done=$((done + 1))
-    [ $((done % 250)) -eq 0 ] && log_debug "  $done/$total..."
-  done < "$map"
+  [ "$total" -gt 0 ] || { log_info "No media to generate."; return 0; }
+  font="$(_placeholder_font)"
+  [ -n "$font" ] || log_warn "No system font found; placeholders won't be labelled."
+  jobs="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+  [ "$jobs" -ge 1 ] 2>/dev/null || jobs=4
+  [ "$jobs" -gt "$total" ] && jobs="$total"
+  log_info "Generating $total placeholder asset(s) ($jobs parallel)..."
+
+  local tmpd k
+  tmpd="$(mktemp -d)"
+  for (( k=0; k<jobs; k++ )); do
+    : > "$tmpd/fail.$k"   # pre-create so the glob below always matches (set -e safe)
+    _rebuild_stripe "$map" "$jobs" "$k" "$im" "$font" "$tmpd/fail.$k" &
+  done
+  wait
+
+  local failed
+  failed="$(cat "$tmpd"/fail.* | wc -l | tr -d ' ')"
   if [ "$failed" -gt 0 ]; then
+    cat "$tmpd"/fail.* 2>/dev/null | while read -r f; do log_warn "  skipped: $f"; done
     log_warn "Generated $((total - failed))/$total placeholder assets ($failed failed)."
   else
     log_ok "Generated $total placeholder asset(s)."
   fi
+  rm -rf "$tmpd"
 }
 
 # The official wordpress:*-apache image ships no wp-cli. Install the phar into the

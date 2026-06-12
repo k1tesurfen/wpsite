@@ -14,7 +14,9 @@ brew install yq imagemagick ffmpeg
 brew install --cask docker        # or Docker Desktop / OrbStack
 
 git clone <this repo> && cd wpsite
-ln -s "$PWD/bin/wpsite" /usr/local/bin/wpsite   # put it on PATH
+./install.sh                      # symlinks bin/wpsite into /usr/local/bin
+                                  #   (WPSITE_BIN_DIR=~/.local/bin ./install.sh to change;
+                                  #    ./install.sh --uninstall to remove)
 
 mkdir -p ~/.config/wpsite
 cp wpsite.yml.example ~/.config/wpsite/wpsite.yml   # then edit
