@@ -16,5 +16,6 @@ cmd_destroy() {
   log_info "Destroying '$client' replica (containers + DB volume + files)..."
   _compose_down "$project" "$docker_dir"
   rm -rf "$docker_dir"
+  _proxy_remove_route "$client"   # drop its proxy route
   log_ok "Destroyed '$client'. Rebuild with: wpsite build $client"
 }

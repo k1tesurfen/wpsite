@@ -49,6 +49,24 @@ cmd_doctor() {
     log_warn "no config at $WPSITE_CONFIG (copy wpsite.yml.example to start)"
   fi
 
+  # Multi-site (optional — replicas still work via /etc/hosts without it)
+  echo >&2
+  log_info "Multi-site (optional)..."
+  if _proxy_running 2>/dev/null; then
+    log_ok "reverse proxy running"
+  else
+    log_info "reverse proxy not running (auto-starts on 'wpsite build')"
+  fi
+  if [ -f /etc/resolver/test ]; then
+    if dscacheutil -q host -a name "wpsite-doctor.test" 2>/dev/null | grep -q '127.0.0.1'; then
+      log_ok "wildcard *.test DNS resolves to 127.0.0.1"
+    else
+      log_warn "/etc/resolver/test exists but *.test doesn't resolve — is dnsmasq running? (sudo brew services restart dnsmasq)"
+    fi
+  else
+    log_info "wildcard DNS not set up — 'wpsite proxy install-dns' removes the per-build sudo (otherwise /etc/hosts is used)"
+  fi
+
   echo >&2
   if [ "$fail" = "0" ]; then
     log_ok "All required dependencies present."

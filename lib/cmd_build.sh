@@ -77,8 +77,11 @@ _image_placeholder() { # im width height out font
 # Paths in media_map are relative to the WP root (wp-content/uploads/...), so the
 # caller must run from the docker dir — NOT from inside uploads, or paths nest.
 _gen_placeholder() { # filepath width height im font
-  local filepath="$1" width="$2" height="$3" im="$4" font="${5:-}" ext
-  mkdir -p "$(dirname "$filepath")" || return 1
+  local filepath="$1" width="$2" height="$3" im="$4" font="${5:-}" ext dir
+  dir="$(dirname "$filepath")"
+  # Parallel stripes often create the SAME uploads dir at once; `mkdir -p` has a
+  # TOCTOU race that fails with EEXIST. Tolerate it: a dir that now exists is fine.
+  mkdir -p "$dir" 2>/dev/null || [ -d "$dir" ] || return 1
   ext="$(printf '%s' "${filepath##*.}" | tr '[:upper:]' '[:lower:]')"
 
   # Missing/zero dimensions: PDFs become empty files; images fall back to 800x600.
@@ -94,7 +97,10 @@ _gen_placeholder() { # filepath width height im font
       # WebM can't hold H.264 — it needs VP8/VP9 (libvpx). mp4/mov use libx264.
       local vcodec=libx264
       [ "$ext" = "webm" ] && vcodec=libvpx
-      ffmpeg -f lavfi -i "color=c=black:s=${width}x${height}:d=1" \
+      # -nostdin is essential: without it ffmpeg reads the loop's stdin (the map
+      # lines feeding `while read`), stealing iterations and corrupting the run —
+      # the cause of intermittent "N failed" under parallel generation.
+      ffmpeg -nostdin -f lavfi -i "color=c=black:s=${width}x${height}:d=1" \
         -c:v "$vcodec" -pix_fmt yuv420p "$filepath" -y >/dev/null 2>&1 || return 1 ;;
     *)
       _image_placeholder "$im" "$width" "$height" "$filepath" "$font" || return 1 ;;
@@ -272,6 +278,58 @@ redis-cache wp-staging wp-staging-pro nginx-helper"
   fi
 }
 
+# Use wildcard DNS when it's configured; otherwise fall back to /etc/hosts.
+_ensure_local_dns() { # host
+  if [ -f "${WPSITE_RESOLVER:-/etc/resolver/test}" ]; then
+    log_debug "Wildcard *.test DNS active; not editing /etc/hosts."
+    return 0
+  fi
+  _add_hosts_entry "$1"
+}
+
+# Render the per-replica compose file. No published host port: the WordPress
+# container joins the shared proxy network so Traefik can reach it by name
+# (wp_<client>_app). db stays on the project's default network only.
+_render_compose() { # db_container app_container image client local_host
+  local db_c="$1" app_c="$2" image="$3"
+  cat <<EOF
+services:
+  db:
+    image: mariadb:10.11
+    container_name: $db_c
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wordpress
+      MYSQL_USER: wordpress
+      MYSQL_PASSWORD: wordpress
+    volumes:
+      - db_data:/var/lib/mysql
+  wordpress:
+    image: $image
+    container_name: $app_c
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - ./wp-content:/var/www/html/wp-content
+    networks:
+      - default
+      - proxy
+networks:
+  proxy:
+    external: true
+    name: ${WPSITE_PROXY_NET}
+volumes:
+  db_data:
+EOF
+}
+
 cmd_build() {
   local client="" backup_id=""
   while [ $# -gt 0 ]; do
@@ -287,12 +345,11 @@ cmd_build() {
   require_client "$client"
   require docker
 
-  local backup_dir docker_dir local_host local_url port
+  local backup_dir docker_dir local_host local_url
   backup_dir="$(client_backup_dir "$client")"
   docker_dir="$(client_docker_dir "$client")"
   local_host="$(client_local_host "$client")"
   local_url="http://$local_host"
-  port="$(client_get "$client" port)"; port="${port:-80}"
 
   [ -d "$backup_dir" ] && [ -n "$(ls -A "$backup_dir" 2>/dev/null)" ] \
     || die "No backups found for $client (run: wpsite backup $client)"
@@ -364,43 +421,21 @@ cmd_build() {
   local image; image="$(_wp_image_tag "$wp_version" "$php_version")"
   log_info "WordPress image: $image"
 
-  # --- Local DNS via /etc/hosts (.test TLD; dnsmasq wildcard is a Phase 3 upgrade) ---
-  _add_hosts_entry "$local_host"
+  # Local DNS: with wildcard *.test in place (wpsite proxy install-dns) nothing is
+  # needed; otherwise fall back to a per-host /etc/hosts entry (sudo).
+  _ensure_local_dns "$local_host"
 
-  cat > docker-compose.yml <<EOF
-services:
-  db:
-    image: mariadb:10.11
-    container_name: $db_c
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: wordpress
-    volumes:
-      - db_data:/var/lib/mysql
-  wordpress:
-    image: $image
-    container_name: $app_c
-    restart: unless-stopped
-    depends_on:
-      - db
-    ports:
-      - "${port}:80"
-    environment:
-      WORDPRESS_DB_HOST: db
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: wordpress
-      WORDPRESS_DB_NAME: wordpress
-    volumes:
-      - ./wp-content:/var/www/html/wp-content
-volumes:
-  db_data:
-EOF
+  _render_compose "$db_c" "$app_c" "$image" "$client" "$local_host" > docker-compose.yml
+
+  # Start the shared reverse proxy (creates the proxy network the compose file
+  # joins) BEFORE bringing the replica up.
+  _proxy_ensure
 
   log_info "Starting containers..."
   docker compose -p "$project" up -d
+
+  # Register the replica's route with the proxy (Traefik picks it up via file-watch).
+  _proxy_write_route "$client" "$local_host"
 
   # Connect over TCP (-h127.0.0.1), not the default socket: the image creates the
   # user as 'wordpress'@'%' (TCP), not @'localhost' (socket), so a socket login is

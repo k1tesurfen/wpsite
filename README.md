@@ -34,6 +34,11 @@ wpsite build <c> --backup <id>   # …use a specific backup (id from `wpsite lis
 wpsite start   <client>   # start a stopped replica (keeps data)
 wpsite stop    <client>   # stop a running replica (keeps data, restartable)
 wpsite destroy <client>   # remove a replica (containers + DB volume + files)
+wpsite prune   <client>   # delete old backups (default: keep newest 5)
+wpsite prune --all --keep 3            # apply to every client
+wpsite prune <c> --older-than 30d --dry-run   # preview by age; --yes to skip the prompt
+wpsite proxy   status     # shared reverse proxy + wildcard DNS status
+wpsite proxy   install-dns             # one-time: *.test → 127.0.0.1 (drops per-build sudo)
 wpsite list    [client]   # all clients + backups, or one client's backups in detail
 wpsite status             # running replicas and their URLs
 wpsite doctor             # verify dependencies and environment
@@ -56,6 +61,20 @@ clients:
 ```
 
 Backups and the Docker working tree live under `<base_dir>/<client>/`.
+
+## Multi-site
+
+Every replica runs at once, each at `http://<client>.test`, via a shared Traefik
+reverse proxy that `wpsite build` starts automatically (no per-replica ports). One
+optional one-time step removes the per-build `sudo`:
+
+```bash
+wpsite proxy install-dns   # dnsmasq: *.test → 127.0.0.1 + /etc/resolver/test (sudo once)
+```
+
+Without it, builds fall back to adding a `/etc/hosts` entry per client (sudo each
+time). The proxy routes by Host header, so e.g. `acme.test` and `baker.test` are
+served simultaneously. `wpsite proxy status` shows what's running.
 
 ## Development
 

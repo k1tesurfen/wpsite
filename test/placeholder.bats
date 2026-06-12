@@ -69,6 +69,11 @@ dims() { "${IDENTIFY[@]}" -format '%wx%h' "$1"; }
   [ "$output" = "100,98" ]
 }
 
+@test "video generation passes -nostdin (else parallel ffmpeg steals the read loop's stdin)" {
+  # Regression guard for the intermittent "N failed" under parallel generation.
+  declare -f _gen_placeholder | grep -q -- '-nostdin'
+}
+
 @test "webm placeholder: uses libvpx (not libx264)" {
   ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libvpx || skip "no libvpx"
   command -v ffprobe >/dev/null 2>&1 || skip "no ffprobe"
