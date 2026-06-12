@@ -199,10 +199,10 @@ _add_hosts_entry() { # host
 _strip_dropins() { # wp_content_dir
   local d="$1" f
   for f in advanced-cache.php object-cache.php db.php; do
-    if [ -f "$d/$f" ]; then rm -f "$d/$f"; log_debug "removed drop-in $f"; fi
+    if [ -f "$d/$f" ]; then rm -f "${d:?}/$f"; log_debug "removed drop-in $f"; fi
   done
   for f in cache wp-rocket-config w3tc-config litespeed; do
-    if [ -e "$d/$f" ]; then rm -rf "$d/$f"; log_debug "removed $f"; fi
+    if [ -e "$d/$f" ]; then rm -rf "${d:?}/$f"; log_debug "removed $f"; fi
   done
   return 0   # never let a falsy [ -e ] test become the function's exit status (set -e)
 }
@@ -303,6 +303,8 @@ cmd_build() {
     latest="$backup_dir/${backup_id%/}"
     [ -d "$latest" ] || die "Backup '$backup_id' not found for $client. See: wpsite list $client"
   else
+    # ls -t sorts by mtime; backup dirs are timestamps so no odd-filename risk.
+    # shellcheck disable=SC2012
     latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"
     latest="${latest%/}"
   fi
@@ -330,7 +332,7 @@ cmd_build() {
   _compose_down "$project" "$docker_dir"
   rm -rf "$docker_dir"
   mkdir -p "$docker_dir"
-  cd "$docker_dir"
+  cd "$docker_dir" || die "Cannot enter $docker_dir"
 
   cp "$latest/db.sql" .
   tar -xzf "$latest/wp-content.tar.gz"

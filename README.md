@@ -57,6 +57,16 @@ clients:
 
 Backups and the Docker working tree live under `<base_dir>/<client>/`.
 
+## Development
+
+```bash
+brew install bats-core shellcheck
+shellcheck -x bin/wpsite lib/*.sh install.sh
+bats test/
+```
+
+CI runs both on every push (`.github/workflows/lint.yml`).
+
 ## Roadmap
 
 See [ROADMAP.md](ROADMAP.md) for planned work (dnsmasq wildcard DNS, a shared

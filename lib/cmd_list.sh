@@ -20,6 +20,7 @@ _list_all_clients() {
     backup_dir="$(client_backup_dir "$client")"
     if [ -d "$backup_dir" ]; then
       count="$(find "$backup_dir" -maxdepth 1 -mindepth 1 -type d | grep -c . || true)"
+      # shellcheck disable=SC2012  # timestamp dirs; mtime sort via ls is fine
       latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"
       latest="$(basename "${latest%/}" 2>/dev/null)"
     else

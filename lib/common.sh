@@ -52,10 +52,12 @@ config_require() {
 
 # Expand a leading ~/ to $HOME (avoids eval on config values).
 expand_tilde() {
-  case "$1" in
-    "~/"*) printf '%s' "$HOME/${1#\~/}" ;;
-    *)     printf '%s' "$1" ;;
-  esac
+  local stripped="${1#"~/"}"
+  if [ "$stripped" != "$1" ]; then    # had a literal ~/ prefix
+    printf '%s' "$HOME/$stripped"
+  else
+    printf '%s' "$1"
+  fi
 }
 
 # yq query helper; prints empty string for missing keys (never the literal "null").

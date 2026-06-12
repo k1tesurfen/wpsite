@@ -1,4 +1,4 @@
-name: lint
+name: ci
 on:
   push:
   pull_request:
@@ -11,4 +11,21 @@ jobs:
       - name: Run shellcheck
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck -x bin/wpsite lib/*.sh
+          shellcheck -x bin/wpsite lib/*.sh install.sh
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick ffmpeg
+          # mikefarah yq (NOT the apt python 'yq', which has different syntax)
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          # recent bats (apt's is too old for BATS_TEST_TMPDIR)
+          sudo npm install -g bats
+      - name: Run tests
+        run: bats test/
