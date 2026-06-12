@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# wpsite — snapshot production WordPress sites over SSH and rebuild
+#          near-perfect local replicas under Docker. macOS + Homebrew.
+#
+set -euo pipefail
+
+# Resolve this script's real path, following symlinks (it's meant to be symlinked
+# onto PATH, e.g. /usr/local/bin/wpsite), so we can find lib/ relative to the repo.
+_src="${BASH_SOURCE[0]}"
+while [ -h "$_src" ]; do
+  _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+  _src="$(readlink "$_src")"
+  [ "${_src#/}" = "$_src" ] && _src="$_dir/$_src"   # relative link → absolutize
+done
+WPSITE_ROOT="$(cd -P "$(dirname "$_src")/.." && pwd)"
+unset _src _dir
+export WPSITE_ROOT
+
+# shellcheck source=lib/common.sh
+source "$WPSITE_ROOT/lib/common.sh"
+for _f in "$WPSITE_ROOT"/lib/cmd_*.sh; do
+  # shellcheck source=/dev/null
+  source "$_f"
+done
+unset _f
+
+VERSION="0.1.0"
+
+usage() {
+  cat >&2 <<EOF
+wpsite $VERSION — WordPress backup & local replica tool
+
+Usage: wpsite <command> [args]
+
+Commands:
+  backup  <client>    Snapshot a remote site (media → placeholders to stay small)
+          --full      …include real media files instead of placeholders
+  build   <client>    (Re)build & run a backup as a local replica (newest by default)
+          --backup <id>   …use a specific backup (see: wpsite list <client>)
+  start   <client>    Start a stopped replica (keeps data)
+  stop    <client>    Stop a running replica (keeps data, restartable)
+  destroy <client>    Remove a replica (containers + DB volume + files)
+  list    [client]    List clients + backups (or one client's backups in detail)
+  status              Show running replicas and their URLs
+  doctor              Verify dependencies and environment
+
+Global flags:
+  -v, --verbose       Verbose logging
+  -h, --help          Show this help
+
+Config: $WPSITE_CONFIG
+EOF
+}
+
+main() {
+  # Global flags before the subcommand
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -v|--verbose) WPSITE_VERBOSE=1; shift ;;
+      -h|--help|help) usage; exit 0 ;;
+      --) shift; break ;;
+      -*) die "Unknown global flag: $1" ;;
+      *) break ;;
+    esac
+  done
+
+  [ $# -ge 1 ] || { usage; exit 1; }
+
+  local cmd="$1"; shift
+  case "$cmd" in
+    backup)  cmd_backup "$@" ;;
+    build)   cmd_build "$@" ;;
+    start)   cmd_start "$@" ;;
+    stop)    cmd_stop "$@" ;;
+    destroy) cmd_destroy "$@" ;;
+    list)    cmd_list "$@" ;;
+    status)  cmd_status "$@" ;;
+    doctor)  cmd_doctor "$@" ;;
+    # Renamed verbs — hint instead of a bare "unknown command".
+    up)   die "'up' was renamed. Use 'wpsite build $*' (rebuild) or 'wpsite start $*' (resume)." ;;
+    down) die "'down' was renamed. Use 'wpsite stop $*' (pause) or 'wpsite destroy $*' (remove)." ;;
+    *) log_error "Unknown command: $cmd"; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

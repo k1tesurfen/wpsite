@@ -1,0 +1,6 @@
+# Local config (contains server hostnames / paths)
+wpsite.yml
+.config/
+
+# macOS
+.DS_Store

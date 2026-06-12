@@ -1,0 +1,25 @@
+# wpsite configuration — copy to ~/.config/wpsite/wpsite.yml
+#
+#   mkdir -p ~/.config/wpsite
+#   cp wpsite.yml.example ~/.config/wpsite/wpsite.yml
+
+# Master root for all client data (backups + docker live under <base_dir>/<client>/).
+# A leading ~/ is expanded to your home directory.
+base_dir: ~/websites
+
+clients:
+  acme:
+    ssh: ubuntu@acme-industrial.com   # ssh target (user@host) for the production server
+    wp_root: /var/www/acme.com        # absolute path to the WordPress install on that server
+    # Optional per-client overrides:
+    # local_host: acme.test           # local hostname (default: <client>.test)
+    # deactivate_plugins:             # extra plugin slugs to disable on the replica
+    #   - some-prod-only-plugin       # (caching/optimization plugins are disabled by default)
+
+  baker:
+    ssh: root@bakery-shop.net
+    wp_root: /var/www/html
+
+  cafe:
+    ssh: cafe_admin@192.168.1.45
+    wp_root: /home/cafe/public_html
