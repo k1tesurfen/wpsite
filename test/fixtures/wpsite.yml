@@ -1,0 +1,11 @@
+base_dir: ~/wpsite-test-root
+clients:
+  acme:
+    ssh: ubuntu@acme.example
+    wp_root: /var/www/acme
+  baker:
+    ssh: root@baker.example
+    wp_root: /var/www/html
+    local_host: baker-custom.test
+    deactivate_plugins:
+      - some-prod-plugin

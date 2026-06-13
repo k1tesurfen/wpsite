@@ -1,6 +1,9 @@
-# Local config (contains server hostnames / paths)
-wpsite.yml
+# Local config (contains server hostnames / paths). Anchored to repo root so the
+# bare name doesn't also swallow test/fixtures/wpsite.yml (the bats config fixture,
+# which MUST be committed or CI's config/apply/backup tests fail on a clean checkout).
+/wpsite.yml
 .config/
+!test/fixtures/wpsite.yml
 
 # macOS
 .DS_Store
