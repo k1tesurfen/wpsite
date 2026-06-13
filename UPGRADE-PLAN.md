@@ -94,30 +94,62 @@ Footnote: some big plugins have their own equivalent (e.g. WooCommerce `wp wc up
 
 ---
 
-## Phase B — before/after screenshots for human review (NO automated diff)
+## Phase B — before/after screenshot review (NO automated diff) — ✅ BUILT
+
+Implemented in `lib/cmd_review.sh` + `upgrade --review`. Captures key pages before/after
+(Playwright in a one-time-built native `wpsite/shot` image, reaching the replica via
+Traefik with `--add-host`), runs a smoke check (200s + no new fatals), builds a
+self-contained `review.html` (drag-to-wipe slider + side-by-side toggle), and `open`s it.
+`wpsite review <client>` re-opens the latest. Verified live (8 pages, real captures).
+Known v1 gap: cookie/consent banners can cover content. Original design below.
 
 By decision: the tool **captures and presents**; the human **judges**. No diff
-algorithm, no thresholds.
+algorithm, no thresholds. Designed for a one-command, lazy workflow.
 
-1. Before the upgrade, screenshot a configurable set of pages (homepage + key pages,
-   or pulled from the sitemap) at one or more viewport widths.
-2. Run the Phase A upgrade.
-3. Screenshot the same pages again.
-4. Generate a **static `review.html`** showing, per page, **before | after** side by
-   side plus an **overlay slider** (drag to wipe between the two). Bash writes the
-   HTML referencing the PNGs and `open`s it.
+### UX
+- `wpsite upgrade <client> --review` — screenshot pages → upgrade → screenshot again →
+  build `review.html` → **`open` it in the default browser**. One command.
+- `wpsite review <client>` — re-open the latest comparison page (no re-run).
+- Plain `wpsite upgrade` stays fast/screenshot-free.
 
-Why this is robust: placeholder media is deterministic (identical before/after), so it
-adds no visual noise — only real theme/plugin rendering changes show up. Dynamic
-content (sliders, dates) is simply judged by eye, not failed by a threshold.
+### Decisions (locked)
+- **Engine: one-shot Playwright/Chromium container** (`docker run --rm`), not a host
+  browser. Reliable full-page captures + `networkidle` waits + consistent rendering, no
+  host deps beyond Docker. Joins the `wpsite_proxy` network and reaches the replica with
+  `--add-host <client>.test:<traefik-ip>` — same path a real browser takes. ~GB one-time
+  image pull.
+- **Pages: home + a small auto-picked set** (recent pages/posts via `wp post list`),
+  overridable per client via `clients.<c>.review_pages: [/, /kontakt, ...]`. Zero-config
+  default, tunable.
+- **Comparison page: default view = drag-to-wipe SLIDER**, with a per-page
+  **side-by-side** toggle. ~30 lines of vanilla JS/CSS, no library, works offline.
+  Header carries client + timestamp + the Phase A old→new summary.
+- **Capture is before-vs-after on the SAME replica** (what the upgrade changed) — the
+  meaningful comparison; same engine/viewport both times, so it's like-for-like.
 
-Tooling TBD: host `shot-scraper` (brew, simplest) vs a Playwright container (no host
-deps, consistent with our Docker-first approach). The page reaching `<client>.test`
-works the same way the browser does (resolve → Traefik). Defer until Phase A is in use.
+### Storage (reuses the Phase A folder)
+`<base_dir>/<client>/upgrades/<timestamp>/` gains `shots/before/*.png`,
+`shots/after/*.png`, `review.html` — alongside `report.txt` + the CSVs. One dated,
+sendable record per quarterly upgrade.
 
-A cheaper pre-step worth having regardless: a **smoke check** — every key page returns
-HTTP 200 and `wp-content/debug.log` shows no new fatals after the upgrade. Catches the
-white-screen class instantly, no browser needed.
+### Smoke check (cheap pre-step, folded into --review)
+Every captured page returns **HTTP 200** and `wp-content/debug.log` shows **no new
+fatals** after the upgrade. Catches the white-screen class instantly, no browser needed;
+reused later by Phase C.
+
+### Caveats (kept honest)
+- Placeholder media is deterministic → no visual noise; only real rendering changes show.
+- Dynamic content (sliders/dates) differs between shots → eyeballed, not failed.
+- Headless rendering may differ from Safari/Chrome, but before/after share the engine so
+  the *comparison* stays valid.
+- Aggressive cookie/consent banners may cover pages → a future `review_dismiss` selector
+  in config; not solved in v1.
+
+### Build order
+1. **Smoke check** — 200s + no-new-fatals on the page list (pure-ish; also feeds Phase C).
+2. **Capture** — Playwright container screenshots a URL list to a dir.
+3. **`review.html` generator** — slider default + side-by-side toggle; `open` it.
+4. **Wire `--review`** into `upgrade` + the `review` re-open command.
 
 ---
 

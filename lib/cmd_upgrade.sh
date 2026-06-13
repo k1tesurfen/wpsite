@@ -48,7 +48,14 @@ _upgrade_report() { # client stamp core_before core_after dir
 }
 
 cmd_upgrade() {
-  local client="${1:-}"
+  local client="" review=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --review) review=1; shift ;;
+      -*) die "Unknown flag: $1" ;;
+      *) client="$1"; shift ;;
+    esac
+  done
   config_require
   require_client "$client"
   require docker
@@ -64,7 +71,21 @@ cmd_upgrade() {
   mkdir -p "$dir"
   log_info "Upgrading '$client' (local replica). Report → $dir"
 
-  # --- BEFORE ---
+  # --- Review setup: page list, fatal baseline, BEFORE screenshots ---
+  local local_host local_url docker_dir fatal_baseline=0 specs=()
+  if [ "$review" = 1 ]; then
+    local_host="$(client_local_host "$client")"
+    local_url="http://$local_host"
+    docker_dir="$(client_docker_dir "$client")"
+    local u
+    while IFS= read -r u; do [ -n "$u" ] && specs+=("$(_url_slug "$u")|$u"); done \
+      < <(_review_pages "$client" "$app_c" "$local_url")
+    fatal_baseline="$(_debug_fatal_count "$docker_dir")"
+    log_info "Capturing ${#specs[@]} page(s) BEFORE upgrade..."
+    _capture_shots "$dir/before" "$local_host" "${specs[@]}" || log_warn "before-capture had issues"
+  fi
+
+  # --- BEFORE versions ---
   local core_before; core_before="$(_upgrade_wp "$app_c" core version 2>/dev/null | tr -d '\r')"
   _upgrade_wp "$app_c" plugin list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.before.csv"
   _upgrade_wp "$app_c" theme  list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/themes.before.csv"
@@ -87,4 +108,15 @@ cmd_upgrade() {
   echo >&2
   _upgrade_report "$client" "$stamp" "$core_before" "$core_after" "$dir" | tee "$dir/report.txt" >&2
   log_ok "Report saved: $dir/report.txt   (reset anytime with: wpsite build $client)"
+
+  # --- Review: AFTER screenshots, smoke check, build + open comparison page ---
+  if [ "$review" = 1 ]; then
+    echo >&2
+    log_info "Capturing ${#specs[@]} page(s) AFTER upgrade..."
+    _capture_shots "$dir/after" "$local_host" "${specs[@]}" || log_warn "after-capture had issues"
+    _smoke_check "$local_host" "$docker_dir" "$fatal_baseline" "${specs[@]}"
+    _render_review_html "$dir" "$client" "$stamp" "${specs[@]}"
+    log_ok "Comparison page: $dir/review.html"
+    _open_file "$dir/review.html"
+  fi
 }

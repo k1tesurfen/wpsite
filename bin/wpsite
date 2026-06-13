@@ -42,7 +42,8 @@ Commands:
   start   <client>    Start a stopped replica (keeps data)
   stop    <client>    Stop a running replica (keeps data, restartable)
   upgrade <client>    Update core/plugins/themes on the replica + write a report
-                      (local only, reversible; rerun 'wpsite build' to reset)
+          --review        …also screenshot key pages before/after & open a comparison
+  review  <client>    Re-open the latest upgrade comparison page in the browser
   destroy <client>    Remove a replica (containers + DB volume + files)
   prune   <client>    Delete old backups (--all for every client; --keep N,
           --all           --older-than Nd, --dry-run, --yes; default --keep 5)
@@ -82,6 +83,7 @@ main() {
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
+    review)  cmd_review "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
     proxy)   cmd_proxy "$@" ;;
