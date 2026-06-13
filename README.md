@@ -34,6 +34,7 @@ wpsite build   <client>   # (re)build & run a backup at http://<client>.test (ne
 wpsite build <c> --backup <id>   # …use a specific backup (id from `wpsite list <c>`)
 wpsite start   <client>   # start a stopped replica (keeps data)
 wpsite stop    <client>   # stop a running replica (keeps data, restartable)
+wpsite upgrade <client>   # update core/plugins/themes on the replica + before→after report
 wpsite destroy <client>   # remove a replica (containers + DB volume + files)
 wpsite prune   <client>   # delete old backups (default: keep newest 5)
 wpsite prune --all --keep 3            # apply to every client

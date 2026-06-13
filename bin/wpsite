@@ -41,6 +41,8 @@ Commands:
           --backup <id>   …use a specific backup (see: wpsite list <client>)
   start   <client>    Start a stopped replica (keeps data)
   stop    <client>    Stop a running replica (keeps data, restartable)
+  upgrade <client>    Update core/plugins/themes on the replica + write a report
+                      (local only, reversible; rerun 'wpsite build' to reset)
   destroy <client>    Remove a replica (containers + DB volume + files)
   prune   <client>    Delete old backups (--all for every client; --keep N,
           --all           --older-than Nd, --dry-run, --yes; default --keep 5)
@@ -79,6 +81,7 @@ main() {
     build)   cmd_build "$@" ;;
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
     proxy)   cmd_proxy "$@" ;;
