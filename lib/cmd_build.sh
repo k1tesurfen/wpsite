@@ -263,6 +263,29 @@ _rewrite_urls() { # app_container  wp_content_dir  local_host  local_url  src_ur
 # including custom ones like `aule` — are left ACTIVE. Runs with --skip-plugins so
 # it edits the active_plugins option without loading (and fataling on) any plugin.
 # Extend per client via clients.<c>.deactivate_plugins in the config.
+# Deactivate any of $slugs that are active in a given scope. status/net_flag pair:
+# "active"/"" for per-site, "active-network"/"--network" for network-wide. Kept set -e
+# safe (empty match is fine; final `return 0`).
+_deactivate_matching() { # app_container  slugs  status  net_flag
+  local app="$1" slugs="$2" status="$3" net_flag="${4:-}"
+  local wp=(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes)
+  local active hit=() c
+  active="$("${wp[@]}" plugin list --status="$status" --field=name 2>/dev/null | tr '\n' ' ')" || return 0
+  for c in $slugs; do
+    case " $active " in *" $c "*) hit+=("$c") ;; esac
+  done
+  if [ "${#hit[@]}" -gt 0 ]; then
+    log_info "Deactivating ${net_flag:+network-}caching/optimization/mail plugins: ${hit[*]}"
+    # Branch (not an empty-array splat) to stay bash-3.2 + set -u safe and shellcheck-clean.
+    if [ -n "$net_flag" ]; then
+      "${wp[@]}" plugin deactivate "${hit[@]}" "$net_flag" --quiet 2>/dev/null || true
+    else
+      "${wp[@]}" plugin deactivate "${hit[@]}" --quiet 2>/dev/null || true
+    fi
+  fi
+  return 0
+}
+
 _sanitize_plugins() { # app_container  extra_slugs
   local app="$1" extra="${2:-}"
   # Caching/optimization + mail/SMTP plugins. The SMTP ones are deactivated so they
@@ -274,18 +297,17 @@ redis-cache wp-staging wp-staging-pro nginx-helper \
 wp-mail-smtp post-smtp easy-wp-smtp fluent-smtp wp-ses gmail-smtp \
 sendgrid-email-delivery-simplified mailgun wp-sendgrid wp-mailgun-smtp"
   local wp=(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes)
-  local active
-  active="$("${wp[@]}" plugin list --status=active --field=name 2>/dev/null | tr '\n' ' ')" || return 0
-  local hit=() c
-  for c in $defaults $extra; do
-    case " $active " in *" $c "*) hit+=("$c") ;; esac
-  done
-  if [ "${#hit[@]}" -gt 0 ]; then
-    log_info "Deactivating caching/optimization/mail plugins: ${hit[*]}"
-    "${wp[@]}" plugin deactivate "${hit[@]}" --quiet 2>/dev/null || true
-  else
-    log_debug "No caching/optimization plugins to deactivate."
+
+  # Per-site activations (single-site, or a subsite-level activation on multisite).
+  _deactivate_matching "$app" "$defaults $extra" active ""
+
+  # Multisite: network-activated plugins live in wp_sitemeta, NOT any site's
+  # active_plugins, so the per-site pass misses them — they need --network to
+  # switch off. Without this, a network-activated cache/backup plugin stays live.
+  if [ "$("${wp[@]}" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+    _deactivate_matching "$app" "$defaults $extra" active-network --network
   fi
+  return 0
 }
 
 # Ensure a known admin login on the replica (production password hashes are

@@ -16,6 +16,42 @@ setup() {
   [[ "$output" == *"WP_ENVIRONMENT_TYPE', 'local'"* ]]
 }
 
+@test "_sanitize_plugins: multisite also deactivates network-activated plugins (--network)" {
+  CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
+  # Stub wp: report wp-rocket per-site active, w3-total-cache network active, multisite=1.
+  docker() {
+    shift 2                                  # drop: exec <container>
+    local args="$*"
+    printf '%s\n' "$args" >> "$CALLS"
+    case "$args" in
+      *"plugin list --status=active "*)         echo wp-rocket ;;
+      *"plugin list --status=active-network"*)  echo w3-total-cache ;;
+      *"is_multisite()"*)                       echo 1 ;;
+    esac
+    return 0
+  }
+  run _sanitize_plugins app
+  [ "$status" -eq 0 ]
+  grep -q 'plugin deactivate wp-rocket --quiet'              "$CALLS"   # per-site, no --network
+  grep -q 'plugin deactivate w3-total-cache --network --quiet' "$CALLS" # network-wide
+}
+
+@test "_sanitize_plugins: single-site never passes --network" {
+  CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
+  docker() {
+    shift 2; local args="$*"; printf '%s\n' "$args" >> "$CALLS"
+    case "$args" in
+      *"plugin list --status=active "*) echo wp-rocket ;;
+      *"is_multisite()"*)               echo 0 ;;
+    esac
+    return 0
+  }
+  run _sanitize_plugins app
+  [ "$status" -eq 0 ]
+  grep -q 'plugin deactivate wp-rocket --quiet' "$CALLS"
+  ! grep -q -- '--network' "$CALLS"
+}
+
 @test "_set_known_admin: creates the user when absent + prints credentials" {
   CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
   docker() { shift 2; printf '%s\n' "$*" >> "$CALLS"; case "$*" in *"user get"*) return 1 ;; esac; return 0; }

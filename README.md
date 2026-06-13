@@ -120,6 +120,7 @@ CI runs both on every push (`.github/workflows/lint.yml`).
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for planned work (dnsmasq wildcard DNS, a shared
-reverse proxy for running multiple sites at once, mailpit, post-import
-sanitization, media tiers).
+See [ROADMAP.md](ROADMAP.md) for the full implementation history and remaining
+work. The core platform (backup/build, dnsmasq wildcard DNS, shared Traefik proxy,
+Mailpit, sanitization, media tiers, multisite) and the quarterly upgrade workflow
+(`upgrade`/`--review`/`apply`) are built and in use.

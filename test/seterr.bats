@@ -66,6 +66,16 @@ echo __REACHED__"; }
   [[ "$output" == *__REACHED__* ]]
 }
 
+@test "_deactivate_matching: no matching plugins -> does not abort" {
+  run env REPO="$REPO" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_build.sh"
+    docker() { echo ""; }; export -f docker      # nothing active
+    _deactivate_matching app "wp-rocket w3-total-cache" active ""
+    echo __REACHED__'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
 @test "_placeholder_font: never errors (exit 0 with or without a font)" {
   strict 'f="$(_placeholder_font)"; printf "font=%s\n" "$f"'
   [ "$status" -eq 0 ]
