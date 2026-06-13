@@ -31,7 +31,7 @@ wpsite mail    up                          # shared Mailpit inbox
    rewriting in another language. (If this ever ships to a team or goes
    cross-platform, revisit with Go — not warranted for single-user macOS today.)
 3. **The replica is a rehearsal, not the source of truth.** We never copy replica
-   data back to production (see Upgrade workflow). We re-run the *validated upgrade*
+   data back to production (see Upgrade workflow). We re-run the _validated upgrade_
    on production in place.
 
 ---
@@ -42,6 +42,7 @@ Everything below is **built and in real use against client sites** unless marked
 otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
 
 ### Foundation & hygiene — ✅ done
+
 - Unified `bin/wpsite` dispatcher + `lib/common.sh`; one `lib/cmd_<name>.sh` per
   subcommand. Arg dispatch only in `bin/wpsite`.
 - `set -euo pipefail` everywhere; `trap` cleanup of remote `/tmp` dirs, the SSH mux,
@@ -52,17 +53,19 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
 - shellcheck + bats gate every push (`.github/workflows/lint.yml`, on macOS).
 
 ### Correctness backbone — ✅ done
+
 - Per-run, per-client remote paths (`/tmp/wpsite_<client>_<timestamp>`) so same-day
   and concurrent runs don't collide.
 - SSH ControlMaster multiplexing (`wpsite_ssh`); rsync-free downloads via tar over
   SSH stdin (shared hosts lack rsync; tar is universal).
 - **Capture the real source URL at backup time** (`wp option get siteurl`/`home` →
-  `meta.env`), not a guessed `<client>.com`. The replica rewrites the *actual* prod
+  `meta.env`), not a guessed `<client>.com`. The replica rewrites the _actual_ prod
   URL → local. Single biggest fidelity win.
 - Pin **both** WP and PHP versions from `meta.env` → `wordpress:<wp>-php<php>-apache`.
 - Local TLD is `.test` (RFC 6761), not `.local` (macOS mDNS reserves it).
 
 ### Replica fidelity & infrastructure — ✅ done
+
 - **Wildcard DNS via dnsmasq** (`wpsite proxy install-dns` → `/etc/resolver/test`).
   Falls back to a per-host `/etc/hosts` entry (sudo) when the resolver isn't set up.
 - **Shared Traefik reverse proxy** so every client replica runs at once. Replicas
@@ -94,6 +97,7 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
   aside so prod-only plugins don't fatal the bootstrap.
 
 ### Media strategy — ✅ done (the clever bit)
+
 - **Placeholder tier (default):** media files are never transferred. `backup` records
   each upload's dimensions (ImageMagick `identify`, `[0]` for first video frame);
   `build` regenerates blank, layout-accurate placeholders at exact dimensions
@@ -113,6 +117,7 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
   real — only true media extensions + regenerable caches are excluded.
 
 ### Lifecycle, UX & distribution — ✅ done
+
 - `build` (heavy re-create), `start`/`stop` (pause/resume, keep data), `destroy`
   (full teardown), `list` (+ detail), `status`, `doctor`. Teardown passes
   `-p <project>` so the named DB volume is actually wiped.
@@ -127,7 +132,7 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
 **Core principle — rehearse locally, apply on production.** The replica's DB is a
 snapshot frozen at backup time and its media are placeholders, so copying replica data
 back to prod would destroy everything that happened since the backup. Instead the
-replica *proves* the upgrade is safe and produces a changelog; then we re-run the same
+replica _proves_ the upgrade is safe and produces a changelog; then we re-run the same
 upgrade commands on production in place, against its own live data. (Better, too:
 premium plugins update more reliably where their license is active.)
 
@@ -137,9 +142,9 @@ premium plugins update more reliably where their license is active.)
   human report (`report.txt`) + CSVs to `<base>/<client>/upgrades/<timestamp>/`.
   Flags premium/manual updates still "available". Fully reversible (`wpsite build` to
   reset). Runs `--skip-plugins --skip-themes` to dodge the `aule` bootstrap fatal —
-  consequence: premium plugins with their own updaters won't update *locally* and are
+  consequence: premium plugins with their own updaters won't update _locally_ and are
   flagged "handle manually"; they update on production in Phase C where licenses are
-  active. *Why `core update-db`:* it runs WordPress's own schema/data migrations a new
+  active. _Why `core update-db`:_ it runs WordPress's own schema/data migrations a new
   core version may need (not a MariaDB upgrade, not content) — wp-admin does this
   automatically; WP-CLI updates files only, so it's an explicit step.
 - **Phase B — `upgrade --review` — ✅ built, verified live.**
@@ -149,7 +154,10 @@ premium plugins update more reliably where their license is active.)
   self-contained `review.html` (drag-to-wipe slider, per-page side-by-side toggle)
   that it `open`s. `wpsite review <client>` re-opens the latest. Pages = home + a
   small auto-picked set (`wp post list`), overridable via `clients.<c>.review_pages`.
-  The tool **captures and presents; the human judges** — no diff algorithm.
+  The tool **captures and presents; the human judges** — no diff algorithm. Capture
+  runs the Playwright API (not the `screenshot` CLI) so it can **hide cookie/consent
+  banners** before each shot — Usercentrics (`#usercentrics-root`) + CCM19
+  (`.ccm-root`) by default, extendable per client via `clients.<c>.review_dismiss`.
 - **Phase C — `wpsite apply <client>` — ✅ built, ⚠ unverified against a live server.**
   The only command that writes to a client server. Sequence: mandatory fresh backup
   (the rollback point; aborts if it fails) → maintenance ON → re-run the validated
@@ -170,7 +178,7 @@ domain-mapped (`mycooldomain.com`) subsites in one network.
 swap only the TLD to `.test`, keeping the original host — `shop.example.com →
 shop.example.test`, `mycooldomain.com → mycooldomain.test`. Handles subdomain and
 mapped subsites uniformly, mirrors prod, all resolve via dnsmasq `*.test`, and
-replacing full hosts *with scheme* avoids touching email addresses.
+replacing full hosts _with scheme_ avoids touching email addresses.
 
 - **M1 — backup detection — ✅.** Records `MULTISITE` + `SUBDOMAIN_INSTALL` in
   `meta.env` and the full network in `sites.csv` (`blog_id,domain,path,url`).
@@ -198,15 +206,12 @@ Small, optional, and unforced — picked up when the need is actually felt.
 
 - **`none` media tier** — skip media entirely (no placeholders) for builds where only
   DB/plugin behavior matters, not layout. Low value given placeholder is fast.
-- **`review_dismiss` selector** — a configurable CSS selector to dismiss cookie/consent
-  banners before screenshots so they don't cover content. Only matters if a client's
-  banners are intrusive.
 - **Domain-mapped multisite verification** — the TLD-swap path treats mapped and
   subdomain subsites identically, but no mapped-domain client backup has been on hand
   to confirm. Verify on the first one.
 - **`apply` live-server verification** — Phase C ships unverified against a real
   server (no prod SSH during development). First real run gets careful, hands-on
-  treatment. *(Held until the user can test end-to-end — not a coding task.)*
+  treatment. _(Held until the user can test end-to-end — not a coding task.)_
 
 ## Deliberately not done
 

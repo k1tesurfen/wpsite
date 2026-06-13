@@ -15,6 +15,10 @@ clients:
     # local_host: acme.test           # local hostname (default: <client>.test)
     # deactivate_plugins:             # extra plugin slugs to disable on the replica
     #   - some-prod-only-plugin       # (caching/optimization plugins are disabled by default)
+    # review_pages:                   # extra pages to screenshot in `upgrade --review`
+    #   - /kontakt                    # (home + a few auto-picked pages are captured by default)
+    # review_dismiss:                 # extra CSS selectors to hide before each screenshot
+    #   - "#my-cookie-banner"         # (Usercentrics #usercentrics-root + CCM19 .ccm-root are hidden by default)
 
   baker:
     ssh: root@bakery-shop.net

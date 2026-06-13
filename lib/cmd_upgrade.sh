@@ -72,9 +72,10 @@ cmd_upgrade() {
   log_info "Upgrading '$client' (local replica). Report → $dir"
 
   # --- Review setup: page list, fatal baseline, BEFORE screenshots ---
-  local docker_dir fatal_baseline=0 specs=() shot_hosts=""
+  local docker_dir fatal_baseline=0 specs=() shot_hosts="" dismiss=""
   if [ "$review" = 1 ]; then
     docker_dir="$(client_docker_dir "$client")"
+    dismiss="$(_review_dismiss "$client")"   # consent banners to hide before each shot
     local u s
     if [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
       # Multisite: home + 1 page per subsite, slugs namespaced; shoot every subsite host.
@@ -89,7 +90,7 @@ cmd_upgrade() {
     shot_hosts="$(_specs_hosts "${specs[@]}" | tr '\n' ' ')"
     fatal_baseline="$(_debug_fatal_count "$docker_dir")"
     log_info "Capturing ${#specs[@]} page(s) BEFORE upgrade..."
-    _capture_shots "$dir/before" "$shot_hosts" "${specs[@]}" || log_warn "before-capture had issues"
+    _capture_shots "$dir/before" "$shot_hosts" "$dismiss" "${specs[@]}" || log_warn "before-capture had issues"
   fi
 
   # --- BEFORE versions ---
@@ -125,7 +126,7 @@ cmd_upgrade() {
   if [ "$review" = 1 ]; then
     echo >&2
     log_info "Capturing ${#specs[@]} page(s) AFTER upgrade..."
-    _capture_shots "$dir/after" "$shot_hosts" "${specs[@]}" || log_warn "after-capture had issues"
+    _capture_shots "$dir/after" "$shot_hosts" "$dismiss" "${specs[@]}" || log_warn "after-capture had issues"
     _smoke_check "$docker_dir" "$fatal_baseline" "${specs[@]}"
     _render_review_html "$dir" "$client" "$stamp" "${specs[@]}"
     log_ok "Comparison page: $dir/review.html"

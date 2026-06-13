@@ -10,6 +10,18 @@
 WPSITE_SHOT_BASE="${WPSITE_SHOT_BASE:-mcr.microsoft.com/playwright:v1.49.1-noble}"
 WPSITE_SHOT_IMAGE="${WPSITE_SHOT_IMAGE:-wpsite/shot}"
 
+# Cookie/consent banners hidden (display:none) before each screenshot so they don't
+# cover content. These are the managers our clients use; extend per client via
+# clients.<c>.review_dismiss (a list of CSS selectors).
+WPSITE_REVIEW_DISMISS_DEFAULTS="${WPSITE_REVIEW_DISMISS_DEFAULTS:-#usercentrics-root .ccm-root}"
+
+# Combined dismiss selectors for a client: built-in defaults + configured extras.
+# Space-separated on one line (the shot script splits on whitespace).
+_review_dismiss() { # client
+  local extra; extra="$(client_get "$1" review_dismiss 2>/dev/null | tr '\n' ' ')"
+  printf '%s %s\n' "$WPSITE_REVIEW_DISMISS_DEFAULTS" "$extra" | tr -s ' ' | sed 's/ *$//'
+}
+
 # Build the screenshot image if absent (one-time; cached thereafter).
 _shot_image_ensure() {
   docker image inspect "$WPSITE_SHOT_IMAGE" >/dev/null 2>&1 && return 0
@@ -82,11 +94,41 @@ _specs_hosts() { # specs...
   done | sort -u
 }
 
+# Playwright API script (run via `node -e`): read "slug|url" specs from stdin, and for
+# each — navigate, inject CSS hiding the DISMISS selectors (consent banners; the rule
+# persists so late-injected banners are hidden too), settle, full-page screenshot to
+# /out/<slug>.png. One reused browser. Single-quoted: no shell interpolation.
+_SHOT_JS='
+const { chromium } = require("playwright");
+const fs = require("fs");
+const dismiss = (process.env.DISMISS || "").split(/\s+/).filter(Boolean);
+const specs = fs.readFileSync(0, "utf8").split("\n").map(l => l.trim()).filter(Boolean);
+(async () => {
+  const browser = await chromium.launch({ args: ["--no-sandbox"] });
+  const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
+  for (const line of specs) {
+    const i = line.indexOf("|"); if (i < 0) continue;
+    const slug = line.slice(0, i), url = line.slice(i + 1);
+    try {
+      await page.goto(url, { waitUntil: "networkidle", timeout: 30000 }).catch(() => {});
+      if (dismiss.length) {
+        const css = dismiss.map(s => s + "{display:none !important;visibility:hidden !important}").join("");
+        await page.addStyleTag({ content: css }).catch(() => {});
+      }
+      await page.waitForTimeout(1500);
+      await page.screenshot({ path: "/out/" + slug + ".png", fullPage: true });
+      console.log("  shot: " + slug);
+    } catch (e) { console.log("  shot FAILED: " + slug); }
+  }
+  await browser.close();
+})();'
+
 # Capture full-page screenshots of each URL into <outdir>. specs are "slug|url".
 # hosts is space-separated: one entry for single-site, every subsite domain for
 # multisite — each gets an --add-host so the browser resolves them all to Traefik.
-_capture_shots() { # outdir hosts specs...
-  local outdir="$1" hosts="$2"; shift 2
+# dismiss is space-separated CSS selectors hidden before each shot (consent banners).
+_capture_shots() { # outdir hosts dismiss specs...
+  local outdir="$1" hosts="$2" dismiss="$3"; shift 3
   mkdir -p "$outdir"
   _shot_image_ensure || return 1
   local tip
@@ -98,21 +140,13 @@ _capture_shots() { # outdir hosts specs...
   # shellcheck disable=SC2086
   for h in $hosts; do add_hosts+=(--add-host "$h:$tip"); done
 
-  # One container, looping the specs from stdin.
+  # One container, looping the specs from stdin via the Playwright API (NODE_PATH points
+  # at the global install). DISMISS + the script travel as env so quoting stays sane.
   printf '%s\n' "$@" | docker run -i --rm \
     --network "$WPSITE_PROXY_NET" "${add_hosts[@]}" \
+    -e DISMISS="$dismiss" -e SHOT_JS="$_SHOT_JS" \
     -v "$outdir":/out "$WPSITE_SHOT_IMAGE" \
-    sh -c '
-      while IFS="|" read -r slug url; do
-        [ -z "$slug" ] && continue
-        if playwright screenshot --full-page \
-             --viewport-size 1440,900 --wait-for-timeout 1500 "$url" "/out/$slug.png" >/dev/null 2>&1; then
-          echo "  shot: $slug"
-        else
-          echo "  shot FAILED: $slug"
-        fi
-      done
-    '
+    sh -c 'NODE_PATH=$(npm root -g) node -e "$SHOT_JS"'
 }
 
 # Count "PHP Fatal" lines in the replica's debug.log (0 if none/absent). Guards the

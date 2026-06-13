@@ -61,6 +61,21 @@ setup() {
   [[ "$output" == *"greyda_artismedia_test__about|http://greyda.artismedia.test/about/"* ]]
 }
 
+@test "_review_dismiss: built-in consent selectors present by default" {
+  client_get() { return 0; }   # no per-client review_dismiss
+  run _review_dismiss acme
+  [[ "$output" == *"#usercentrics-root"* ]]   # Usercentrics
+  [[ "$output" == *".ccm-root"* ]]            # CCM19
+}
+
+@test "_review_dismiss: per-client selectors are appended to the defaults" {
+  client_get() { [ "$2" = "review_dismiss" ] && printf '#my-banner\n.foo-consent\n'; return 0; }
+  run _review_dismiss acme
+  [[ "$output" == *"#usercentrics-root"* ]]
+  [[ "$output" == *"#my-banner"* ]]
+  [[ "$output" == *".foo-consent"* ]]
+}
+
 @test "_specs_hosts: unique replica hosts across specs" {
   run _specs_hosts 'a__home|http://greyd.x.test/' 'a__about|http://greyd.x.test/about/' 'b__home|http://greyda.x.test/'
   [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
