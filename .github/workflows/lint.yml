@@ -3,29 +3,28 @@ on:
   push:
   pull_request:
 
+# wpsite is a macOS-only tool (Homebrew + BSD userland + /System fonts + Docker
+# Desktop). Test on macOS so CI matches the only supported platform — running on
+# Linux produced false failures (GNU-vs-BSD date/ImageMagick, no /System fonts so
+# _placeholder_font returned non-zero) and used an older shellcheck that warns on
+# patterns newer versions accept.
+
 jobs:
   shellcheck:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: brew install shellcheck
       - name: Run shellcheck
-        run: |
-          sudo apt-get update && sudo apt-get install -y shellcheck
-          shellcheck -x bin/wpsite lib/*.sh install.sh
+        run: shellcheck -x bin/wpsite lib/*.sh install.sh
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y imagemagick ffmpeg
-          # mikefarah yq (NOT the apt python 'yq', which has different syntax)
-          sudo wget -qO /usr/local/bin/yq \
-            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-          # recent bats (apt's is too old for BATS_TEST_TMPDIR)
-          sudo npm install -g bats
+        # mikefarah yq (brew's `yq`), ImageMagick + ffmpeg for placeholders, bats runner.
+        run: brew install imagemagick ffmpeg yq bats-core
       - name: Run tests
         run: bats test/
