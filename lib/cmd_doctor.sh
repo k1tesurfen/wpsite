@@ -57,6 +57,11 @@ cmd_doctor() {
   else
     log_info "reverse proxy not running (auto-starts on 'wpsite build')"
   fi
+  if _mail_running 2>/dev/null; then
+    log_ok "Mailpit running (inbox: http://localhost:${WPSITE_MAIL_UI_PORT:-8025})"
+  else
+    log_info "Mailpit not running (auto-starts on 'wpsite build')"
+  fi
   if [ -f /etc/resolver/test ]; then
     if dscacheutil -q host -a name "wpsite-doctor.test" 2>/dev/null | grep -q '127.0.0.1'; then
       log_ok "wildcard *.test DNS resolves to 127.0.0.1"

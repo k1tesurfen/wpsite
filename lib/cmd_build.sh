@@ -260,9 +260,14 @@ _rewrite_urls() { # app_container  wp_content_dir  local_host  local_url  src_ur
 # Extend per client via clients.<c>.deactivate_plugins in the config.
 _sanitize_plugins() { # app_container  extra_slugs
   local app="$1" extra="${2:-}"
+  # Caching/optimization + mail/SMTP plugins. The SMTP ones are deactivated so they
+  # can't route mail around Mailpit via an API/external relay (the mu-plugin then
+  # catches wp_mail through the default PHPMailer path).
   local defaults="wp-rocket w3-total-cache wp-super-cache litespeed-cache wp-fastest-cache \
 comet-cache cache-enabler breeze sg-cachepress autoptimize wp-optimize swift-performance \
-redis-cache wp-staging wp-staging-pro nginx-helper"
+redis-cache wp-staging wp-staging-pro nginx-helper \
+wp-mail-smtp post-smtp easy-wp-smtp fluent-smtp wp-ses gmail-smtp \
+sendgrid-email-delivery-simplified mailgun wp-sendgrid wp-mailgun-smtp"
   local wp=(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes)
   local active
   active="$("${wp[@]}" plugin list --status=active --field=name 2>/dev/null | tr '\n' ' ')" || return 0
@@ -271,11 +276,27 @@ redis-cache wp-staging wp-staging-pro nginx-helper"
     case " $active " in *" $c "*) hit+=("$c") ;; esac
   done
   if [ "${#hit[@]}" -gt 0 ]; then
-    log_info "Deactivating caching/optimization plugins: ${hit[*]}"
+    log_info "Deactivating caching/optimization/mail plugins: ${hit[*]}"
     "${wp[@]}" plugin deactivate "${hit[@]}" --quiet 2>/dev/null || true
   else
     log_debug "No caching/optimization plugins to deactivate."
   fi
+}
+
+# Ensure a known admin login on the replica (production password hashes are
+# unknown). Creates/updates a dedicated user so existing accounts are untouched.
+# Overridable via WPSITE_ADMIN_USER / WPSITE_ADMIN_PASS.
+_set_known_admin() { # app_container local_url
+  local app="$1" url="$2"
+  local login="${WPSITE_ADMIN_USER:-wpsite}" pass="${WPSITE_ADMIN_PASS:-wpsite}"
+  local wp=(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes)
+  if "${wp[@]}" user get "$login" >/dev/null 2>&1; then
+    "${wp[@]}" user update "$login" --user_pass="$pass" --role=administrator --quiet >/dev/null 2>&1 || true
+  else
+    "${wp[@]}" user create "$login" "${login}@local.test" --role=administrator \
+      --user_pass="$pass" --quiet >/dev/null 2>&1 || true
+  fi
+  log_ok "Admin login: $login / $pass   →   $url/wp-admin/"
 }
 
 # Use wildcard DNS when it's configured; otherwise fall back to /etc/hosts.
@@ -316,6 +337,15 @@ services:
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wordpress
       WORDPRESS_DB_NAME: wordpress
+      # Dev debugging: WP_DEBUG on, errors logged to wp-content/debug.log (not shown
+      # on the page, so layouts aren't broken by prod's deprecation spam).
+      WORDPRESS_DEBUG: "1"
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+        @ini_set('display_errors', '0');
+        define('SCRIPT_DEBUG', true);
+        define('WP_ENVIRONMENT_TYPE', 'local');
     volumes:
       - ./wp-content:/var/www/html/wp-content
     networks:
@@ -400,6 +430,10 @@ cmd_build() {
   # production URLs, and fatal wp-cli's bootstrap. New backups already omit them.
   _strip_dropins wp-content
 
+  # Trap ALL outgoing mail: drop in the mu-plugin that routes wp_mail() to Mailpit.
+  # (Mail/SMTP plugins that could bypass it are deactivated in _sanitize_plugins.)
+  _inject_mailpit_muplugin wp-content
+
   # Placeholder mode: regenerate blank media from the map (run from the docker dir
   # so the wp-content/uploads/... paths resolve correctly — no cd into uploads).
   # Full mode: real media already came down in the tarball, nothing to do.
@@ -427,9 +461,10 @@ cmd_build() {
 
   _render_compose "$db_c" "$app_c" "$image" "$client" "$local_host" > docker-compose.yml
 
-  # Start the shared reverse proxy (creates the proxy network the compose file
-  # joins) BEFORE bringing the replica up.
+  # Start the shared infra (proxy + Mailpit) — both create/use the proxy network
+  # the compose file joins — BEFORE bringing the replica up.
   _proxy_ensure
+  _mail_ensure
 
   log_info "Starting containers..."
   docker compose -p "$project" up -d
@@ -463,6 +498,7 @@ cmd_build() {
       log_warn "No source URL in metadata; skipping domain rewrite (older backup?)."
     fi
     _sanitize_plugins "$app_c" "$(client_get "$client" deactivate_plugins)"
+    _set_known_admin "$app_c" "$local_url"
   fi
 
   log_ok "SUCCESS: $local_url is live."

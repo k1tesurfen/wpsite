@@ -39,6 +39,7 @@ wpsite prune --all --keep 3            # apply to every client
 wpsite prune <c> --older-than 30d --dry-run   # preview by age; --yes to skip the prompt
 wpsite proxy   status     # shared reverse proxy + wildcard DNS status
 wpsite proxy   install-dns             # one-time: *.test → 127.0.0.1 (drops per-build sudo)
+wpsite mail    status     # shared Mailpit (traps all replica email); inbox at :8025
 wpsite list    [client]   # all clients + backups, or one client's backups in detail
 wpsite status             # running replicas and their URLs
 wpsite doctor             # verify dependencies and environment
@@ -75,6 +76,23 @@ wpsite proxy install-dns   # dnsmasq: *.test → 127.0.0.1 + /etc/resolver/test 
 Without it, builds fall back to adding a `/etc/hosts` entry per client (sudo each
 time). The proxy routes by Host header, so e.g. `acme.test` and `baker.test` are
 served simultaneously. `wpsite proxy status` shows what's running.
+
+## Email is trapped (never sent)
+
+Replicas run a production database with **real customer addresses**, so `build`
+auto-starts a shared **Mailpit** container and injects a mu-plugin that routes every
+`wp_mail()` to it — nothing is ever delivered for real. Read what the site sends at
+**http://localhost:8025**. Mail/SMTP plugins are deactivated so they can't relay
+around it. `wpsite mail status` / `down` manage the container.
+
+## Dev conveniences on every replica
+
+- **WP_DEBUG on** — errors logged to `wp-content/debug.log` (not shown on the page),
+  with `WP_ENVIRONMENT_TYPE=local` and `SCRIPT_DEBUG`.
+- **A known admin login** — production password hashes are unknown, so `build`
+  creates/refreshes a dedicated admin and prints it: `wpsite` / `wpsite`. Log in at
+  `http://<client>.test/wp-admin/`. Override with `WPSITE_ADMIN_USER` /
+  `WPSITE_ADMIN_PASS`. (Existing accounts are left untouched.)
 
 ## Development
 

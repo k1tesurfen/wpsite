@@ -45,6 +45,7 @@ Commands:
           --all           --older-than Nd, --dry-run, --yes; default --keep 5)
   proxy   <action>    Shared reverse proxy + wildcard DNS for running all replicas
                       at once: up | down | status | install-dns
+  mail    <action>    Shared Mailpit that traps all replica email: up | down | status
   list    [client]    List clients + backups (or one client's backups in detail)
   status              Show running replicas and their URLs
   doctor              Verify dependencies and environment
@@ -80,6 +81,7 @@ main() {
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
     proxy)   cmd_proxy "$@" ;;
+    mail)    cmd_mail "$@" ;;
     list)    cmd_list "$@" ;;
     status)  cmd_status "$@" ;;
     doctor)  cmd_doctor "$@" ;;
