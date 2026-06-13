@@ -37,6 +37,7 @@ wpsite stop    <client>   # stop a running replica (keeps data, restartable)
 wpsite upgrade <client>   # update core/plugins/themes on the replica + before→after report
 wpsite upgrade <c> --review   # …also screenshot pages before/after & open a comparison
 wpsite review  <client>   # re-open the latest upgrade comparison page
+wpsite apply   <client>   # run the rehearsed upgrade ON PRODUCTION (fresh backup + typed confirm)
 wpsite destroy <client>   # remove a replica (containers + DB volume + files)
 wpsite prune   <client>   # delete old backups (default: keep newest 5)
 wpsite prune --all --keep 3            # apply to every client
@@ -97,6 +98,15 @@ around it. `wpsite mail status` / `down` manage the container.
   creates/refreshes a dedicated admin and prints it: `wpsite` / `wpsite`. Log in at
   `http://<client>.test/wp-admin/`. Override with `WPSITE_ADMIN_USER` /
   `WPSITE_ADMIN_PASS`. (Existing accounts are left untouched.)
+
+## The quarterly retainer loop
+
+`backup --all` → `build <client>` → `upgrade <client> --review` (eyeball before/after) →
+`apply <client>` (run the same upgrade on production). `apply` rehearses nothing itself:
+it takes a fresh production backup as a rollback point, requires you to type the client
+name, runs the WP-CLI updates over SSH in maintenance mode, and verifies the site
+responds. It **never copies replica data to production** — it re-runs the validated
+upgrade in place. Rollback is manual (it points you at the fresh backup).
 
 ## Development
 

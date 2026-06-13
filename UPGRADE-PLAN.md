@@ -153,7 +153,21 @@ reused later by Phase C.
 
 ---
 
-## Phase C — `wpsite apply <client>` (production; heavily guarded, never auto-chained)
+## Phase C — `wpsite apply <client>` — ✅ BUILT (⚠ unverified against a live server)
+
+Implemented in `lib/cmd_apply.sh`. Guards: typed-name confirmation (`_confirm_prod`),
+mandatory fresh backup as rollback point (aborts if it fails), one client at a time.
+Sequence: fresh backup → maintenance ON → `core update`/`update-db`, `plugin/theme
+update --all`, `cache flush` over SSH → maintenance OFF (always) → verify the live home
+URL returns 200 → prod report (reuses the upgrade report renderer). **Never copies
+replica data to prod** — re-runs the validated upgrade in place.
+
+**Deliberately NOT done: automated rollback.** An untested auto-restore running on
+production is its own footgun, so on failure `apply` deactivates maintenance mode and
+points at the fresh backup + manual steps. The whole command ships **unverified against
+a real server** (no prod SSH during development) — only the orchestration/guards are
+unit-tested (`test/apply.bats`, fully stubbed). Treat the first real run as careful.
+Original design below.
 
 Only after local validation and an explicit human decision. Re-runs the validated
 upgrade **on production in place** — never copies replica data.

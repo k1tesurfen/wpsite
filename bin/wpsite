@@ -44,6 +44,8 @@ Commands:
   upgrade <client>    Update core/plugins/themes on the replica + write a report
           --review        …also screenshot key pages before/after & open a comparison
   review  <client>    Re-open the latest upgrade comparison page in the browser
+  apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
+                      typed confirmation; irreversible — rehearse with --review first)
   destroy <client>    Remove a replica (containers + DB volume + files)
   prune   <client>    Delete old backups (--all for every client; --keep N,
           --all           --older-than Nd, --dry-run, --yes; default --keep 5)
@@ -84,6 +86,7 @@ main() {
     stop)    cmd_stop "$@" ;;
     upgrade) cmd_upgrade "$@" ;;
     review)  cmd_review "$@" ;;
+    apply)   cmd_apply "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
     proxy)   cmd_proxy "$@" ;;

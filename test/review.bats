@@ -37,11 +37,11 @@ setup() {
     'home|http://acme.test/' 'kontakt|http://acme.test/kontakt/'
   f="$BATS_TEST_TMPDIR/review.html"
   [ -f "$f" ]
-  grep -q 'class="cmp"' "$f"
-  grep -q 'clip-path' "$f"            # the wipe slider
+  grep -q 'class="page sbs"' "$f"     # side-by-side is the DEFAULT view
+  grep -q 'clip-path' "$f"            # the wipe slider is available via toggle
   grep -q 'before/home.png' "$f"
   grep -q 'after/kontakt.png' "$f"
-  grep -q 'side by side' "$f"         # the toggle
+  grep -q 'side by side ⇄ slider' "$f"
 }
 
 @test "cmd_review: errors clearly when there's no review yet" {

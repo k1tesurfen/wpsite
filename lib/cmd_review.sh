@@ -148,13 +148,13 @@ h1{font-size:16px;margin:0}.meta{color:#9aa0a6;font-size:13px;margin-top:4px}
 .page.sbs .cmp{display:none}.page.sbs .side{display:flex}
 </style></head><body>
 <header><h1>wpsite review — $client</h1>
-<div class="meta">$stamp · drag the slider to compare · toggle for side-by-side</div></header>
+<div class="meta">$stamp · before / after side by side · toggle any page to the wipe slider</div></header>
 HEAD
     for spec in "$@"; do
       slug="${spec%%|*}"; url="${spec#*|}"
       cat <<SECTION
-<div class="page">
-  <span class="toggle" onclick="toggle(this)">slider ⇄ side by side</span>
+<div class="page sbs">
+  <span class="toggle" onclick="toggle(this)">side by side ⇄ slider</span>
   <h2>$slug</h2><div class="url">$url</div>
   <div class="cmp">
     <img class="after" src="after/$slug.png" alt="after">
