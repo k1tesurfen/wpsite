@@ -205,6 +205,75 @@ outward-facing — maximum caution.
 4. **Phase C** — `apply` to production, with fresh backup + rollback. Design separately
    and carefully when the rest has earned its keep.
 
+## Multisite support (subdomain + domain-mapped)
+
+Clients: 2–3 networks of 3–8 sites, mixing subdomain (`site1.domain.com`) and
+domain-mapped (`mycooldomain.com`, `myotherdomain.com`) subsites in the same network.
+
+**Mapping rule (locked): read EVERY domain from the live network (`wp site list` /
+`wp_blogs`/`wp_site`) and swap only the TLD to `.test`, keeping the original host:**
+
+```
+example.com         → example.test
+shop.example.com    → shop.example.test
+mycooldomain.com    → mycooldomain.test      (a mapped subsite)
+```
+
+Handles subdomain AND mapped subsites uniformly, mirrors prod (easy to recognise), all
+resolve via dnsmasq `*.test`, and replacing full hosts *with scheme* avoids touching
+email addresses. Detected early; **correctness over speed**.
+
+### Phase M1 — backup detection — ✅ BUILT
+Remote backup records `MULTISITE` + `SUBDOMAIN_INSTALL` in `meta.env` and the full
+network in `sites.csv` (`blog_id,domain,path,url`). Single-site unaffected (`MULTISITE=0`,
+no `sites.csv`). ⚠ unverified against a real multisite (none available in dev).
+
+### Phase M2 — `core update-db --network` — ✅ BUILT
+`upgrade` + `apply` detect `is_multisite()` at runtime and run `core update-db --network`
+on networks (`--network` errors on single sites, so it must be conditional). Makes the
+production `apply` correct for multisite **now**, before local replicas exist.
+
+### Phase M3 — multisite replica build — ✅ BUILT & VERIFIED (greyda, 6 subsites)
+Gated behind `MULTISITE=1`; single-site path untouched & test-guarded. Logic lives in
+`lib/cmd_build_multisite.sh`; `cmd_build` branches on `is_ms`.
+- Inject constants via `WORDPRESS_CONFIG_EXTRA` (`MULTISITE`, `SUBDOMAIN_INSTALL`,
+  `DOMAIN_CURRENT_SITE` = the main site's `.test` host). ✅
+- **Fix `wp_site`/`wp_blogs` domains with RAW SQL first** — breaks the wp-cli bootstrap
+  chicken-and-egg (can't run `wp` on a network whose domains don't match the config). ✅
+- Then per-domain content `search-replace` (reuse the http/https/escaped matrix) for
+  every domain in `sites.csv`. ✅
+- Traefik route lists every local domain: ``Host(`d1.test`) || Host(`d2.test`) || …``. ✅
+- **REQUIRES dnsmasq** wildcard DNS (`proxy install-dns`); `/etc/hosts` can't wildcard.
+- Known login (`wpsite`) created first, THEN promoted to super-admin. ✅
+- **Verified:** all 6 greyda subsites (`greyd…greydu.artismedia.test`) return HTTP 200
+  through Traefik with distinct titles; `wp site list` shows correct `.test` domains.
+- Note: bare `wp` fatals on the Greyd `aule` plugin (`add_settings_error()` at
+  `plugins_loaded` in CLI context) — every helper runs `--skip-plugins --skip-themes`.
+- TODO: `--network` deactivation of network-activated plugins still uses per-site
+  `_sanitize_plugins`; revisit if a client network-activates a plugin we must disable.
+
+### Phase M4 — multisite review — ✅ BUILT & VERIFIED (greyda, 12 specs)
+`upgrade --review` branches on `is_multisite()`. Multisite path (`_ms_review_specs`):
+home + 1 published page **per subsite**, subsite list read from the running replica's
+DB (already `.test` after M3). Slugs namespaced by host (`greyda_artismedia_test__home`)
+so `home`/`home` across sites don't overwrite each other's PNG. `_capture_shots` now takes
+a space-separated host list → one `--add-host` per subsite domain; `_smoke_check` derives
+the Host header per-spec so it spans the whole network. Single-site path unchanged.
+- **Verified:** against the live greyda replica `_ms_review_specs` yields 12 specs
+  (6 subsites × 2), `_specs_hosts` lists all 6 `.test` domains. New bats cases:
+  `_ms_review_specs` (namespacing + 2/site) and `_specs_hosts` (unique hosts).
+
+### Caveats
+- Replica is a faithful *rehearsal*, not a perfect clone (cross-subdomain cookies/SSO,
+  network-admin nuances differ).
+- Per-host URL replacement leaves email addresses intact; anything that slips through is
+  harmless on a throwaway local replica (Mailpit traps mail anyway).
+- Theoretical `.test` collisions across clients (two clients → same swapped host); per-
+  client route files match exact hosts, and real domains haven't collided.
+- **M1–M3 verified against the greyda network** (6 subdomain subsites) via a local build —
+  no SSH. Domain-mapped networks remain unverified (no such client backup on hand yet);
+  the TLD-swap path treats them uniformly, but confirm on the first mapped client.
+
 ## Open questions
 
 - Which pages get screenshotted? (homepage + manual list in config, vs sitemap crawl.)

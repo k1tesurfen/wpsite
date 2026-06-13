@@ -60,6 +60,31 @@ setup() {
   [[ "$output" == *"Production upgraded"* ]]
 }
 
+@test "apply: single-site uses plain update-db" {
+  _backup_one_client() { return 0; }   # _prod_wp default: is_multisite -> "" -> not multisite
+  run cmd_apply acme
+  [ "$status" -eq 0 ]
+  grep -qx 'core update-db' "$CALLS"
+  ! grep -q 'core update-db --network' "$CALLS"
+}
+
+@test "apply: multisite uses update-db --network + warns" {
+  _backup_one_client() { return 0; }
+  _prod_wp() {
+    shift 2; printf '%s\n' "$*" >> "$CALLS"
+    case "$*" in
+      *is_multisite*)      echo 1 ;;
+      *"core version"*)    echo 6.5 ;;
+      *"option get home"*) echo "https://acme.example" ;;
+      *list*)              echo "name,version,update" ;;
+    esac
+  }
+  run cmd_apply acme
+  [ "$status" -eq 0 ]
+  grep -q 'core update-db --network' "$CALLS"
+  [[ "$output" == *"Multisite network detected"* ]]
+}
+
 @test "apply: always deactivates maintenance mode + flags rollback on non-200" {
   _backup_one_client() { return 0; }
   curl() { echo 502; }

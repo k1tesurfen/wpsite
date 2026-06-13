@@ -17,7 +17,7 @@ cmd_doctor() {
   log_info "Checking local dependencies..."
   _check yq      yq          "config parsing"
   _check docker  --cask\ docker "containers"
-  _check rsync   rsync       "downloading backup artifacts"
+  _check tar     gnu-tar     "downloading backup artifacts"
   _check ffmpeg  ffmpeg      "video placeholders"
   _check ssh     openssh     "remote access"
 

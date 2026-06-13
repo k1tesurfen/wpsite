@@ -44,6 +44,30 @@ setup() {
   grep -q 'side by side ⇄ slider' "$f"
 }
 
+@test "_ms_review_specs: home + 1 page per subsite, host-namespaced slugs" {
+  # Stub wp-cli: subsite list, then one extra page per subsite (echoes its --url back).
+  _upgrade_wp() {
+    shift   # drop app container
+    case "$1" in
+      site) printf 'http://greyd.artismedia.test/\nhttp://greyda.artismedia.test/\n' ;;
+      post) local a url=""; for a in "$@"; do case "$a" in --url=*) url="${a#--url=}" ;; esac; done
+            printf '%sabout/\n' "$url" ;;
+    esac
+  }
+  run _ms_review_specs app
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 4 ]                 # 2 subsites × 2 pages
+  [[ "$output" == *"greyd_artismedia_test__home|http://greyd.artismedia.test/"* ]]
+  [[ "$output" == *"greyda_artismedia_test__home|http://greyda.artismedia.test/"* ]]   # distinct from greyd
+  [[ "$output" == *"greyda_artismedia_test__about|http://greyda.artismedia.test/about/"* ]]
+}
+
+@test "_specs_hosts: unique replica hosts across specs" {
+  run _specs_hosts 'a__home|http://greyd.x.test/' 'a__about|http://greyd.x.test/about/' 'b__home|http://greyda.x.test/'
+  [ "$(printf '%s\n' "$output" | grep -c .)" -eq 2 ]
+  [[ "$output" == *"greyd.x.test"* ]]
+  [[ "$output" == *"greyda.x.test"* ]]
+}
+
 @test "cmd_review: errors clearly when there's no review yet" {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"

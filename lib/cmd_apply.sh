@@ -34,7 +34,6 @@ cmd_apply() {
   local client="${1:-}"
   config_require
   require_client "$client"
-  require rsync
 
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"
@@ -75,11 +74,23 @@ cmd_apply() {
   log_info "[2/5] Maintenance mode ON..."
   _prod_wp "$ssh_target" "$wp_root" maintenance-mode activate >/dev/null 2>&1 || log_warn "could not enable maintenance mode"
 
+  # Multisite networks migrate every subsite's DB → need --network on update-db.
+  local is_ms=0
+  if [ "$(_prod_wp "$ssh_target" "$wp_root" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+    is_ms=1
+    log_warn "Multisite network detected — update-db will run --network across all subsites."
+    log_warn "Note: the local rehearsal (build/--review) does not yet cover multisite — verify subsites by hand."
+  fi
+
   # 3) Upgrades on production (in place).
   log_info "[3/5] Updating core/plugins/themes on PRODUCTION..."
   local ok=1
-  _prod_wp "$ssh_target" "$wp_root" core update          >/dev/null 2>&1 || { ok=0; log_warn "core update failed"; }
-  _prod_wp "$ssh_target" "$wp_root" core update-db        >/dev/null 2>&1 || { ok=0; log_warn "core update-db failed"; }
+  _prod_wp "$ssh_target" "$wp_root" core update >/dev/null 2>&1 || { ok=0; log_warn "core update failed"; }
+  if [ "$is_ms" = 1 ]; then
+    _prod_wp "$ssh_target" "$wp_root" core update-db --network >/dev/null 2>&1 || { ok=0; log_warn "core update-db --network failed"; }
+  else
+    _prod_wp "$ssh_target" "$wp_root" core update-db >/dev/null 2>&1 || { ok=0; log_warn "core update-db failed"; }
+  fi
   _prod_wp "$ssh_target" "$wp_root" plugin update --all   >/dev/null 2>&1 || { ok=0; log_warn "plugin update failed"; }
   _prod_wp "$ssh_target" "$wp_root" theme update --all    >/dev/null 2>&1 || { ok=0; log_warn "theme update failed"; }
   _prod_wp "$ssh_target" "$wp_root" cache flush           >/dev/null 2>&1 || true

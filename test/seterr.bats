@@ -40,6 +40,17 @@ echo __REACHED__"; }
   [[ "$output" == *__REACHED__* ]]
 }
 
+@test "_rebuild_media: empty (present) map -> 'No media' not a pipefail abort" {
+  # Shipped bug: `total="$(grep -c . map | head -1)"` on an EMPTY map made grep exit 1,
+  # pipefail propagated it, and set -e silently aborted the whole build after teardown.
+  strict '
+    m="$(mktemp)"; : > "$m"      # present but zero lines (SVG-only site)
+    _rebuild_media "$m" "$(command -v magick || command -v convert || echo magick)"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
 @test "_rebuild_media: all-success map does not abort (fail.* glob fix)" {
   # This is the exact bug we shipped: when nothing fails, the fail.* glob matched
   # nothing and the failed=\$(cat ...) assignment aborted under set -e.

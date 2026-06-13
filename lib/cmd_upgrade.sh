@@ -72,17 +72,24 @@ cmd_upgrade() {
   log_info "Upgrading '$client' (local replica). Report → $dir"
 
   # --- Review setup: page list, fatal baseline, BEFORE screenshots ---
-  local local_host local_url docker_dir fatal_baseline=0 specs=()
+  local docker_dir fatal_baseline=0 specs=() shot_hosts=""
   if [ "$review" = 1 ]; then
-    local_host="$(client_local_host "$client")"
-    local_url="http://$local_host"
     docker_dir="$(client_docker_dir "$client")"
-    local u
-    while IFS= read -r u; do [ -n "$u" ] && specs+=("$(_url_slug "$u")|$u"); done \
-      < <(_review_pages "$client" "$app_c" "$local_url")
+    local u s
+    if [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+      # Multisite: home + 1 page per subsite, slugs namespaced; shoot every subsite host.
+      while IFS= read -r s; do [ -n "$s" ] && specs+=("$s"); done < <(_ms_review_specs "$app_c")
+    else
+      local local_host local_url
+      local_host="$(client_local_host "$client")"
+      local_url="http://$local_host"
+      while IFS= read -r u; do [ -n "$u" ] && specs+=("$(_url_slug "$u")|$u"); done \
+        < <(_review_pages "$client" "$app_c" "$local_url")
+    fi
+    shot_hosts="$(_specs_hosts "${specs[@]}" | tr '\n' ' ')"
     fatal_baseline="$(_debug_fatal_count "$docker_dir")"
     log_info "Capturing ${#specs[@]} page(s) BEFORE upgrade..."
-    _capture_shots "$dir/before" "$local_host" "${specs[@]}" || log_warn "before-capture had issues"
+    _capture_shots "$dir/before" "$shot_hosts" "${specs[@]}" || log_warn "before-capture had issues"
   fi
 
   # --- BEFORE versions ---
@@ -93,7 +100,12 @@ cmd_upgrade() {
   # --- Upgrades (the version diff is the source of truth, so warn-don't-die) ---
   log_info "Updating WordPress core..."
   _upgrade_wp "$app_c" core update    >/dev/null 2>&1 || log_warn "core update reported an issue"
-  _upgrade_wp "$app_c" core update-db >/dev/null 2>&1 || log_warn "core update-db reported an issue"
+  # Multisite migrates ALL subsites' tables → needs --network (which errors on single sites).
+  if [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
+    _upgrade_wp "$app_c" core update-db --network >/dev/null 2>&1 || log_warn "core update-db --network reported an issue"
+  else
+    _upgrade_wp "$app_c" core update-db >/dev/null 2>&1 || log_warn "core update-db reported an issue"
+  fi
   log_info "Updating plugins..."
   _upgrade_wp "$app_c" plugin update --all >/dev/null 2>&1 || log_warn "some plugins did not update"
   log_info "Updating themes..."
@@ -113,8 +125,8 @@ cmd_upgrade() {
   if [ "$review" = 1 ]; then
     echo >&2
     log_info "Capturing ${#specs[@]} page(s) AFTER upgrade..."
-    _capture_shots "$dir/after" "$local_host" "${specs[@]}" || log_warn "after-capture had issues"
-    _smoke_check "$local_host" "$docker_dir" "$fatal_baseline" "${specs[@]}"
+    _capture_shots "$dir/after" "$shot_hosts" "${specs[@]}" || log_warn "after-capture had issues"
+    _smoke_check "$docker_dir" "$fatal_baseline" "${specs[@]}"
     _render_review_html "$dir" "$client" "$stamp" "${specs[@]}"
     log_ok "Comparison page: $dir/review.html"
     _open_file "$dir/review.html"

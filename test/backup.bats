@@ -31,8 +31,12 @@ if [[ "$*" == *"db export"* ]]; then
   for a in "$@"; do case "$a" in /*) echo "-- dump" > "$a";; esac; done; exit 0
 fi
 case "$*" in
+  *is_multisite*)        echo "${STUB_MULTISITE:-0}" ;;
+  *SUBDOMAIN_INSTALL*)   echo 1 ;;
+  *PHP_MAJOR*)           echo "8.3" ;;
+  *"site list"*)         printf 'blog_id,domain,path,url\n1,x.de,/,https://x.de/\n2,shop.x.de,/,https://shop.x.de/\n' ;;
   *siteurl*) echo "https://x.de";; *home*) echo "https://x.de";;
-  *"core version"*) echo "6.4";; *eval*) echo "8.3";;
+  *"core version"*) echo "6.4";;
 esac
 EOF
   cat > "$STUB/identify" <<'EOF'
@@ -42,15 +46,31 @@ EOF
   chmod +x "$STUB/wp" "$STUB/identify"
 }
 
-# run the remote payload with FULL_BACKUP=$1 ("" or "1"); mode mirrors cmd_backup
+# run the remote payload with FULL_BACKUP=$1 ("" or "1"); mode mirrors cmd_backup.
+# STUB_MULTISITE (env) drives the stubbed is_multisite().
 run_backup() {
   local mode="placeholder"; [ "$1" = "1" ] && mode="full"
   { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE\n' \
       "$ROOT" "$OUT" "$1" "$mode"
     _backup_remote_script
-  } | PATH="$STUB:$PATH" bash -s
+  } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" PATH="$STUB:$PATH" bash -s
 }
 in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
+
+@test "single-site: meta says MULTISITE=0, no sites.csv" {
+  STUB_MULTISITE=0 run_backup ""
+  grep -q '^MULTISITE=0' "$OUT/meta.env"
+  [ ! -f "$OUT/sites.csv" ]
+}
+
+@test "multisite: records MULTISITE + SUBDOMAIN_INSTALL + the network sites.csv" {
+  STUB_MULTISITE=1 run_backup ""
+  grep -q '^MULTISITE=1' "$OUT/meta.env"
+  grep -q '^SUBDOMAIN_INSTALL=1' "$OUT/meta.env"
+  [ -f "$OUT/sites.csv" ]
+  grep -q 'shop.x.de' "$OUT/sites.csv"      # a subsite domain was captured
+  [ "$(grep -c ',' "$OUT/sites.csv")" -ge 2 ]   # header + >=2 sites
+}
 
 @test "light: produces all four artifacts incl. media_map" {
   run_backup ""

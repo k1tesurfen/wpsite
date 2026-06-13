@@ -54,19 +54,53 @@ _review_pages() { # client app_container local_url
   } | awk 'NF && !seen[$0]++' | head -8
 }
 
+# Multisite review specs: home + 1 published page PER subsite (your 2-pages-each rule).
+# Subsite list comes from the running replica (its DB already holds the .test URLs).
+# Slugs are namespaced by host (`greyda_artismedia_test__home`) so they never collide
+# across sites — `home`/`home` would otherwise overwrite one PNG. Prints "slug|url".
+_ms_review_specs() { # app_container
+  local app="$1" site_url host label extra
+  _upgrade_wp "$app" site list --field=url 2>/dev/null | tr -d '\r' \
+  | while IFS= read -r site_url; do
+      [ -n "$site_url" ] || continue
+      host="${site_url#*://}"; host="${host%%/*}"
+      label="$(printf '%s' "$host" | tr -c '[:alnum:]' '_')"
+      printf '%s|%s\n' "${label}__home" "$site_url"
+      extra="$(_upgrade_wp "$app" post list --url="$site_url" --post_type=page,post \
+        --post_status=publish --posts_per_page=1 --field=url 2>/dev/null | tr -d '\r' | head -1)"
+      [ -n "$extra" ] && printf '%s|%s\n' "${label}__$(_url_slug "$extra")" "$extra"
+    done
+  return 0
+}
+
+# Unique replica hosts referenced by a set of "slug|url" specs (for --add-host).
+_specs_hosts() { # specs...
+  local spec url host
+  for spec in "$@"; do
+    url="${spec#*|}"; host="${url#*://}"; host="${host%%/*}"
+    [ -n "$host" ] && printf '%s\n' "$host"
+  done | sort -u
+}
+
 # Capture full-page screenshots of each URL into <outdir>. specs are "slug|url".
-_capture_shots() { # outdir host specs...
-  local outdir="$1" host="$2"; shift 2
+# hosts is space-separated: one entry for single-site, every subsite domain for
+# multisite — each gets an --add-host so the browser resolves them all to Traefik.
+_capture_shots() { # outdir hosts specs...
+  local outdir="$1" hosts="$2"; shift 2
   mkdir -p "$outdir"
   _shot_image_ensure || return 1
   local tip
   tip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$WPSITE_PROXY_NET\").IPAddress}}" "$WPSITE_PROXY_CONTAINER" 2>/dev/null)"
   [ -n "$tip" ] || { log_warn "Proxy not running; cannot screenshot."; return 1; }
 
-  # One container, looping the specs from stdin. --add-host lets the browser resolve
-  # <client>.test to Traefik, so in-page assets referencing the .test domain work too.
+  # One --add-host per replica domain (so in-page assets on any .test host resolve too).
+  local add_hosts=() h
+  # shellcheck disable=SC2086
+  for h in $hosts; do add_hosts+=(--add-host "$h:$tip"); done
+
+  # One container, looping the specs from stdin.
   printf '%s\n' "$@" | docker run -i --rm \
-    --network "$WPSITE_PROXY_NET" --add-host "$host:$tip" \
+    --network "$WPSITE_PROXY_NET" "${add_hosts[@]}" \
     -v "$outdir":/out "$WPSITE_SHOT_IMAGE" \
     sh -c '
       while IFS="|" read -r slug url; do
@@ -91,12 +125,15 @@ _debug_fatal_count() { # docker_dir
 }
 
 # Post-upgrade smoke check: every page 200, no new fatals. Informational (warn only).
-_smoke_check() { # host docker_dir fatal_baseline specs...
-  local host="$1" docker_dir="$2" baseline="$3"; shift 3
-  local bad=0 spec slug url path code
+# Host is derived per-spec from its URL, so it spans every subsite on a multisite.
+_smoke_check() { # docker_dir fatal_baseline specs...
+  local docker_dir="$1" baseline="$2"; shift 2
+  local bad=0 spec slug url hostpath host path code
   for spec in "$@"; do
     slug="${spec%%|*}"; url="${spec#*|}"
-    path="${url#*://}"; case "$path" in */*) path="/${path#*/}" ;; *) path="/" ;; esac
+    hostpath="${url#*://}"                       # host[/path]
+    host="${hostpath%%/*}"
+    case "$hostpath" in */*) path="/${hostpath#*/}" ;; *) path="/" ;; esac
     code="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $host" \
       "http://127.0.0.1$path" 2>/dev/null || echo 000)"
     [ "$code" = "200" ] || { log_warn "  smoke: $slug returned HTTP $code"; bad=$((bad + 1)); }

@@ -33,13 +33,21 @@ _backup_remote_script() {
     mkdir -p "$REMOTE_TMP"
 
     echo "Capturing site metadata..."
+    IS_MS="$(wp eval 'echo is_multisite() ? 1 : 0;' --allow-root 2>/dev/null | tr -d '[:space:]')"
+    [ "$IS_MS" = "1" ] || IS_MS=0
     {
       echo "SOURCE_SITEURL=$(wp option get siteurl --allow-root 2>/dev/null)"
       echo "SOURCE_HOME=$(wp option get home --allow-root 2>/dev/null)"
       echo "WP_VERSION=$(wp core version --allow-root 2>/dev/null)"
       echo "PHP_VERSION=$(wp eval 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' --allow-root 2>/dev/null)"
       echo "BACKUP_MODE=${BACKUP_MODE:-placeholder}"
+      echo "MULTISITE=$IS_MS"
     } > "$REMOTE_TMP/meta.env"
+    if [ "$IS_MS" = "1" ]; then
+      echo "Multisite detected — recording the network (sites.csv)..."
+      echo "SUBDOMAIN_INSTALL=$(wp eval 'echo (defined("SUBDOMAIN_INSTALL") && SUBDOMAIN_INSTALL) ? 1 : 0;' --allow-root 2>/dev/null | tr -d '[:space:]')" >> "$REMOTE_TMP/meta.env"
+      wp site list --fields=blog_id,domain,path,url --format=csv --allow-root 2>/dev/null | tr -d '\r' > "$REMOTE_TMP/sites.csv"
+    fi
 
     echo "Exporting database..."
     wp db export "$REMOTE_TMP/db.sql" --allow-root
@@ -152,9 +160,22 @@ _backup_one_client() { # client full_flag
     return 1
   fi
 
+  # Download via tar-over-SSH (not rsync): shared hosts like mittwald often lack
+  # rsync, but always have tar (it just built wp-content.tar.gz). MUST be checked
+  # explicitly — _backup_one_client runs inside an `if` (for --all), which disables
+  # set -e, so an unchecked failure would silently report success.
   log_info "Downloading artifacts..."
-  rsync -az -e "ssh -o ControlPath=$WPSITE_SSH_CONTROL_DIR/%C" \
-    "$ssh_target:$remote_tmp/" "$dest/"
+  if ! wpsite_ssh "$ssh_target" "tar -czf - -C '$remote_tmp' ." | tar -xzf - -C "$dest"; then
+    log_error "$client: download failed (is tar available on the server?)."
+    wpsite_ssh "$ssh_target" "rm -rf '$remote_tmp'" 2>/dev/null || true
+    return 1
+  fi
+  # Sanity-check the artifacts actually arrived (catches a partial transfer).
+  if ! [ -s "$dest/db.sql" ] || ! [ -s "$dest/wp-content.tar.gz" ]; then
+    log_error "$client: backup incomplete (db.sql / wp-content.tar.gz missing)."
+    wpsite_ssh "$ssh_target" "rm -rf '$remote_tmp'" 2>/dev/null || true
+    return 1
+  fi
 
   wpsite_ssh "$ssh_target" "rm -rf '$remote_tmp'" 2>/dev/null || true   # explicit cleanup
   log_ok "Backup saved to $dest"
@@ -172,7 +193,6 @@ cmd_backup() {
   done
 
   config_require
-  require rsync
 
   # Determine the target client list (sequential — one remote server at a time).
   local clients=() c

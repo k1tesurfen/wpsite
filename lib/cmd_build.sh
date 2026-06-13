@@ -129,7 +129,12 @@ _rebuild_media() { # media_map_file im_convert
   local map="$1" im="$2"
   [ -f "$map" ] || return 0
   local total font jobs
-  total="$(grep -c . "$map" 2>/dev/null || echo 0)"
+  # grep -c prints "0" AND exits 1 on no match. Guard with `|| true` — NOT `|| echo 0`
+  # (double-prints "0\n0", breaking the int test) and NOT a pipe to `head` (under
+  # `set -o pipefail` the substitution inherits grep's exit 1 and `set -e` silently
+  # aborts the whole build). grep -c already prints exactly one line, so this is enough.
+  total="$(grep -c . "$map" 2>/dev/null || true)"
+  [ -n "$total" ] || total=0
   [ "$total" -gt 0 ] || { log_info "No media to generate."; return 0; }
   font="$(_placeholder_font)"
   [ -n "$font" ] || log_warn "No system font found; placeholders won't be labelled."
@@ -311,8 +316,17 @@ _ensure_local_dns() { # host
 # Render the per-replica compose file. No published host port: the WordPress
 # container joins the shared proxy network so Traefik can reach it by name
 # (wp_<client>_app). db stays on the project's default network only.
-_render_compose() { # db_container app_container image client local_host
-  local db_c="$1" app_c="$2" image="$3"
+_render_compose() { # db_container app_container image client local_host ms_php
+  local db_c="$1" app_c="$2" image="$3" ms_php="${6:-}"
+  # Standard dev defines + optional multisite constants, all indented 8 spaces for
+  # the WORDPRESS_CONFIG_EXTRA YAML block scalar.
+  local extra="        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+        @ini_set('display_errors', '0');
+        define('SCRIPT_DEBUG', true);
+        define('WP_ENVIRONMENT_TYPE', 'local');"
+  [ -n "$ms_php" ] && extra="$extra
+$(printf '%s\n' "$ms_php" | sed 's/^/        /')"
   cat <<EOF
 services:
   db:
@@ -341,11 +355,7 @@ services:
       # on the page, so layouts aren't broken by prod's deprecation spam).
       WORDPRESS_DEBUG: "1"
       WORDPRESS_CONFIG_EXTRA: |
-        define('WP_DEBUG_LOG', true);
-        define('WP_DEBUG_DISPLAY', false);
-        @ini_set('display_errors', '0');
-        define('SCRIPT_DEBUG', true);
-        define('WP_ENVIRONMENT_TYPE', 'local');
+$extra
     volumes:
       - ./wp-content:/var/www/html/wp-content
     networks:
@@ -455,11 +465,23 @@ cmd_build() {
   local image; image="$(_wp_image_tag "$wp_version" "$php_version")"
   log_info "WordPress image: $image"
 
+  # --- Multisite: drive the local host + wp-config from the captured network ---
+  local is_ms ms_php="" sites_csv="$latest/sites.csv"
+  is_ms="$(_meta_get MULTISITE "$meta")"
+  if [ "$is_ms" = "1" ] && [ -f "$sites_csv" ]; then
+    local_host="$(_swap_tld "$(_ms_main_domain "$sites_csv")")"   # main site's .test host
+    local_url="http://$local_host"
+    ms_php="$(_ms_config_extra "$local_host" "$(_meta_get SUBDOMAIN_INSTALL "$meta")")"
+    log_info "Multisite network — main site: $local_url ($(tail -n +2 "$sites_csv" | grep -c . ) subsites)"
+  else
+    is_ms=0
+  fi
+
   # Local DNS: with wildcard *.test in place (wpsite proxy install-dns) nothing is
   # needed; otherwise fall back to a per-host /etc/hosts entry (sudo).
-  _ensure_local_dns "$local_host"
+  if [ "$is_ms" = "1" ]; then _ms_ensure_dns "$sites_csv"; else _ensure_local_dns "$local_host"; fi
 
-  _render_compose "$db_c" "$app_c" "$image" "$client" "$local_host" > docker-compose.yml
+  _render_compose "$db_c" "$app_c" "$image" "$client" "$local_host" "$ms_php" > docker-compose.yml
 
   # Start the shared infra (proxy + Mailpit) — both create/use the proxy network
   # the compose file joins — BEFORE bringing the replica up.
@@ -470,7 +492,8 @@ cmd_build() {
   docker compose -p "$project" up -d
 
   # Register the replica's route with the proxy (Traefik picks it up via file-watch).
-  _proxy_write_route "$client" "$local_host"
+  # Multisite lists every subsite domain; single-site is the one host.
+  if [ "$is_ms" = "1" ]; then _ms_write_route "$client" "$sites_csv"; else _proxy_write_route "$client" "$local_host"; fi
 
   # Connect over TCP (-h127.0.0.1), not the default socket: the image creates the
   # user as 'wordpress'@'%' (TCP), not @'localhost' (socket), so a socket login is
@@ -486,10 +509,28 @@ cmd_build() {
   log_info "Importing database..."
   docker exec -i "$db_c" mariadb -h127.0.0.1 -uwordpress -pwordpress wordpress < db.sql
 
+  # Multisite: fix wp_site/wp_blogs domains with raw SQL FIRST, so wp-cli can then
+  # bootstrap the network (the domains must match DOMAIN_CURRENT_SITE in wp-config).
+  if [ "$is_ms" = "1" ]; then
+    log_info "Rewriting network domains (wp_site/wp_blogs)..."
+    _ms_fix_domains "$db_c" "$local_host" "$sites_csv" >/dev/null 2>&1 || log_warn "network domain SQL fix had issues"
+  fi
+
   # --- Rewrite production domain → local replica URL (uses captured URLs) ---
   if ! _ensure_wp_cli "$app_c"; then
     log_warn "Could not install wp-cli in $app_c; skipped domain rewrite + sanitization."
     log_warn "Site may still reference production URLs."
+  elif [ "$is_ms" = "1" ]; then
+    log_info "Rewriting content URLs across the network..."
+    _ms_rewrite_content "$app_c" "$sites_csv"
+    _sanitize_plugins "$app_c" "$(client_get "$client" deactivate_plugins)"
+    # Create the known admin first, THEN grant network super-admin (promotion needs
+    # the user to exist) — gives a working network-admin login on the replica.
+    _set_known_admin "$app_c" "$local_url"
+    docker exec "$app_c" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
+      super-admin add "${WPSITE_ADMIN_USER:-wpsite}" >/dev/null 2>&1 || true
+    # Membership on every blog so the admin-bar "My Sites" lists all subsites.
+    _ms_join_all_sites "$app_c" "${WPSITE_ADMIN_USER:-wpsite}" "$sites_csv"
   else
     if [ -n "$source_home$source_siteurl" ]; then
       log_info "Rewriting production domain to $local_url..."
