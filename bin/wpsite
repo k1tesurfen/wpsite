@@ -35,6 +35,7 @@ Usage: wpsite <command> [args]
 
 Commands:
   backup  <client>    Snapshot a remote site (media → placeholders to stay small)
+          --all       …back up every configured client, in sequence
           --full      …include real media files instead of placeholders
   build   <client>    (Re)build & run a backup as a local replica (newest by default)
           --backup <id>   …use a specific backup (see: wpsite list <client>)

@@ -28,6 +28,7 @@ wpsite doctor                     # verify everything is ready
 
 ```bash
 wpsite backup  <client>   # snapshot a remote site → local backup artifacts (media → placeholders)
+wpsite backup --all       # …back up every configured client, one after another
 wpsite backup --full <c>  # …download REAL media instead (larger, exact replica)
 wpsite build   <client>   # (re)build & run a backup at http://<client>.test (newest by default)
 wpsite build <c> --backup <id>   # …use a specific backup (id from `wpsite list <c>`)

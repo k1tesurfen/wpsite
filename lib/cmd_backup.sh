@@ -110,33 +110,22 @@ _backup_remote_script() {
 REMOTE_EOF
 }
 
-cmd_backup() {
-  local client="" full=0
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --full) full=1; shift ;;
-      -*) die "Unknown flag: $1" ;;
-      *) client="$1"; shift ;;
-    esac
-  done
-
-  config_require
-  require_client "$client"
-  require rsync
+# Back up a single client. Returns non-zero (without die-ing) so --all can carry
+# on to the next client. Assumes ssh mux is already set up by the caller.
+_backup_one_client() { # client full_flag
+  local client="$1" full="$2"
 
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"
   wp_root="$(client_get "$client" wp_root)"
-  [ -n "$ssh_target" ] || die "clients.$client.ssh not set in config"
-  [ -n "$wp_root" ]    || die "clients.$client.wp_root not set in config"
+  [ -n "$ssh_target" ] || { log_error "$client: clients.$client.ssh not set"; return 1; }
+  [ -n "$wp_root" ]    || { log_error "$client: clients.$client.wp_root not set"; return 1; }
 
-  local timestamp run_id remote_tmp dest
+  local timestamp run_id remote_tmp dest mode="placeholder" full_flag=""
   timestamp="$(date +%Y%m%d_%H%M%S)"
   run_id="wpsite_${client}_${timestamp}"
   remote_tmp="/tmp/${run_id}"
   dest="$(client_backup_dir "$client")/$timestamp"
-
-  local mode="placeholder" full_flag=""
   [ "$full" = "1" ] && { mode="full"; full_flag="1"; }
 
   log_info "Client:       $client"
@@ -144,34 +133,79 @@ cmd_backup() {
   log_info "Local backup: $dest"
   log_info "Mode:         $mode$([ "$mode" = full ] && echo ' (real media, larger)' || echo ' (media → placeholders)')"
 
-  ssh_setup_mux
-
-  # The EXIT trap fires after this function returns, so it can't read the locals
-  # (set -u would trip on the now-unbound names). Stash what cleanup needs in
-  # globals and read them defensively.
+  # Stash what the EXIT-trap safety net needs (locals are gone by the time it fires).
   _WPSITE_CLEAN_TARGET="$ssh_target"
   _WPSITE_CLEAN_TMP="$remote_tmp"
-  trap _backup_cleanup EXIT
 
   mkdir -p "$dest"
 
-  # The remote script is piped over stdin to `bash -s` — no embedding in a
-  # command-line argument, so its single quotes/heredocs can't break anything,
-  # and no tmux is required. WP_ROOT/REMOTE_TMP are prepended as assignments,
-  # shell-quoted with %q. Output streams live; a non-zero exit means failure.
+  # The remote script is piped to `bash -s` over stdin — no embedding in a command
+  # argument (its quotes/heredocs stay safe), no tmux. Output streams live.
   log_info "Running remote backup (streaming output)..."
   if ! {
     printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE\n' \
       "$wp_root" "$remote_tmp" "$full_flag" "$mode"
     _backup_remote_script
   } | wpsite_ssh "$ssh_target" bash -s; then
-    die "Remote backup failed (see output above)."
+    log_error "$client: remote backup failed (see output above)."
+    wpsite_ssh "$ssh_target" "rm -rf '$remote_tmp'" 2>/dev/null || true
+    return 1
   fi
 
   log_info "Downloading artifacts..."
   rsync -az -e "ssh -o ControlPath=$WPSITE_SSH_CONTROL_DIR/%C" \
     "$ssh_target:$remote_tmp/" "$dest/"
 
+  wpsite_ssh "$ssh_target" "rm -rf '$remote_tmp'" 2>/dev/null || true   # explicit cleanup
   log_ok "Backup saved to $dest"
-  # Trap handles remote cleanup + mux teardown.
+}
+
+cmd_backup() {
+  local all=0 full=0 client=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all)  all=1; shift ;;
+      --full) full=1; shift ;;
+      -*) die "Unknown flag: $1" ;;
+      *) client="$1"; shift ;;
+    esac
+  done
+
+  config_require
+  require rsync
+
+  # Determine the target client list (sequential — one remote server at a time).
+  local clients=() c
+  if [ "$all" = 1 ]; then
+    [ -z "$client" ] || die "Use either a <client> or --all, not both."
+    while IFS= read -r c; do [ -n "$c" ] && clients+=("$c"); done < <(config_clients)
+    [ "${#clients[@]}" -gt 0 ] || die "No clients configured."
+  else
+    [ -n "$client" ] || die "Specify a <client>, or --all to back up every client."
+    require_client "$client"
+    clients=("$client")
+  fi
+
+  ssh_setup_mux
+  trap _backup_cleanup EXIT   # safety net: cleans the in-progress client + mux on abort
+
+  local failed=() ok=0 total="${#clients[@]}"
+  for c in "${clients[@]}"; do
+    [ "$total" -gt 1 ] && log_info "━━ ($((ok + ${#failed[@]} + 1))/$total) $c ━━"
+    if _backup_one_client "$c" "$full"; then
+      ok=$((ok + 1))
+    else
+      failed+=("$c")
+    fi
+  done
+
+  ssh_close_mux
+  trap - EXIT
+
+  if [ "${#failed[@]}" -gt 0 ]; then
+    [ "$total" -gt 1 ] && log_warn "Backed up $ok/$total; failed: ${failed[*]}"
+    return 1
+  fi
+  [ "$total" -gt 1 ] && log_ok "Backed up all $ok client(s)."
+  return 0
 }
