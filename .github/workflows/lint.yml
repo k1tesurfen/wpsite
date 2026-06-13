@@ -13,7 +13,7 @@ jobs:
   shellcheck:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install shellcheck
         run: brew install shellcheck
       - name: Run shellcheck
@@ -22,7 +22,7 @@ jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install dependencies
         # mikefarah yq (brew's `yq`), ImageMagick + ffmpeg for placeholders, bats runner.
         run: brew install imagemagick ffmpeg yq bats-core
