@@ -41,11 +41,12 @@ Commands:
           --backup <id>   …use a specific backup (see: wpsite list <client>)
   start   <client>    Start a stopped replica (keeps data)
   stop    <client>    Stop a running replica (keeps data, restartable)
-  upgrade <client>    Update core/plugins/themes on the replica + write a report
-          --review        …also screenshot key pages before/after & open a comparison
+          --all       …stop all running client replicas
+  upgrade <client>    Update core/plugins/themes on the replica + write a report (with visual review)
+          --noreview      …skip taking screenshots & opening comparison page
   review  <client>    Re-open the latest upgrade comparison page in the browser
   apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
-                      typed confirmation; irreversible — rehearse with --review first)
+                      typed confirmation; irreversible — rehearse first)
   destroy <client>    Remove a replica (containers + DB volume + files)
   prune   <client>    Delete old backups (--all for every client; --keep N,
           --all           --older-than Nd, --dry-run, --yes; default --keep 5)
@@ -55,6 +56,7 @@ Commands:
   list    [client]    List clients + backups (or one client's backups in detail)
   status              Show running replicas and their URLs
   doctor              Verify dependencies and environment
+  test    <client>    Verify remote host connection, directories, and CLI/DB readiness
 
 Global flags:
   -v, --verbose       Verbose logging
@@ -94,6 +96,7 @@ main() {
     list)    cmd_list "$@" ;;
     status)  cmd_status "$@" ;;
     doctor)  cmd_doctor "$@" ;;
+    test)    cmd_test "$@" ;;
     # Renamed verbs — hint instead of a bare "unknown command".
     up)   die "'up' was renamed. Use 'wpsite build $*' (rebuild) or 'wpsite start $*' (resume)." ;;
     down) die "'down' was renamed. Use 'wpsite stop $*' (pause) or 'wpsite destroy $*' (remove)." ;;

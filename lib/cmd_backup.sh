@@ -113,7 +113,7 @@ _backup_remote_script() {
     for f in advanced-cache.php object-cache.php db.php; do
       tar_excludes+=( --exclude="wp-content/$f" )
     done
-    tar -czf "$REMOTE_TMP/wp-content.tar.gz" "${tar_excludes[@]}" wp-content
+    tar -czf "$REMOTE_TMP/wp-content.tar.gz" "${tar_excludes[@]}" wp-content || [ $? -eq 1 ]
     echo "BACKUP_SUCCESSFUL"
 REMOTE_EOF
 }

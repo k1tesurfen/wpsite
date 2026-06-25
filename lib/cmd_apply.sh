@@ -20,7 +20,59 @@ _confirm_prod() { # client
 # Run a wp-cli command on the production server over SSH (in the WP root).
 _prod_wp() { # ssh_target wp_root wp-args...
   local t="$1" root="$2"; shift 2
-  wpsite_ssh "$t" "cd '$root' && wp $* --allow-root"
+  # Safely shell-escape all remaining arguments to preserve quoting/spaces over SSH
+  local escaped_args
+  escaped_args="$(printf '%q ' "$@")"
+  # Detect if the remote wp command is a shell script wrapper (like on Mittwald).
+  # If so, run it directly; otherwise run with PHP memory & time overrides.
+  local remote_cmd
+  remote_cmd="wp_bin=\$(which wp 2>/dev/null || echo wp); if [ -f \"\$wp_bin\" ] && head -n1 \"\$wp_bin\" 2>/dev/null | grep -qE \"sh|bash\"; then wp $escaped_args --allow-root; else php -d memory_limit=512M -d max_execution_time=300 \"\$wp_bin\" $escaped_args --allow-root; fi"
+  wpsite_ssh "$t" "cd '$root' && $remote_cmd"
+}
+
+_prod_maintenance_on() { # ssh_target wp_root
+  local t="$1" root="$2"
+  # Upload custom maintenance.php drop-in first.
+  cat << 'EOF' | wpsite_ssh "$t" "cat > '$root/wp-content/maintenance.php'"
+<?php
+// Custom static maintenance page served during upgrades.
+// Bypasses WordPress core and database initialization.
+header('HTTP/1.1 503 Service Temporarily Unavailable');
+header('Status: 503 Service Temporarily Unavailable');
+header('Retry-After: 600');
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scheduled Maintenance</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f7f9fa; color: #333; text-align: center; padding: 100px 20px 50px 20px; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); border-top: 4px solid #007cba; }
+        h1 { color: #1d2327; font-size: 24px; margin-top: 0; margin-bottom: 16px; }
+        p { color: #50575e; font-size: 16px; line-height: 1.5; margin-bottom: 24px; }
+        .spinner { display: inline-block; width: 30px; height: 30px; border: 3px solid #f3f3f3; border-top: 3px solid #007cba; border-radius: 50%; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Scheduled Maintenance</h1>
+        <p>This site is currently undergoing scheduled updates and will be back online shortly. Thank you for your patience!</p>
+        <div class="spinner"></div>
+    </div>
+</body>
+</html>
+EOF
+
+  # Drop the .maintenance file to activate the lock.
+  wpsite_ssh "$t" "echo '<?php \$upgrading = time() + 3600; ?>' > '$root/.maintenance'"
+}
+
+_prod_maintenance_off() { # ssh_target wp_root
+  local t="$1" root="$2"
+  wpsite_ssh "$t" "rm -f '$root/.maintenance'"
 }
 
 # Capture name,version,update for plugins+themes from prod into the given dir.
@@ -72,7 +124,7 @@ cmd_apply() {
 
   # 2) Maintenance mode on.
   log_info "[2/5] Maintenance mode ON..."
-  _prod_wp "$ssh_target" "$wp_root" maintenance-mode activate >/dev/null 2>&1 || log_warn "could not enable maintenance mode"
+  _prod_maintenance_on "$ssh_target" "$wp_root" || log_warn "could not enable maintenance mode"
 
   # Multisite networks migrate every subsite's DB → need --network on update-db.
   local is_ms=0
@@ -91,24 +143,71 @@ cmd_apply() {
   else
     _prod_wp "$ssh_target" "$wp_root" core update-db >/dev/null 2>&1 || { ok=0; log_warn "core update-db failed"; }
   fi
-  _prod_wp "$ssh_target" "$wp_root" plugin update --all   >/dev/null 2>&1 || { ok=0; log_warn "plugin update failed"; }
-  _prod_wp "$ssh_target" "$wp_root" theme update --all    >/dev/null 2>&1 || { ok=0; log_warn "theme update failed"; }
+  # Update plugins individually (prevents single-plugin failures from breaking the cascade)
+  log_info "Updating plugins on PRODUCTION..."
+  local plugins
+  plugins="$(_prod_wp "$ssh_target" "$wp_root" plugin list --update=available --field=name 2>/dev/null | tr -d '\r')"
+  if [ -n "$plugins" ]; then
+    local p
+    for p in $plugins; do
+      if [ "$p" = "wp-staging-pro" ]; then
+        log_info "  Skipping premium plugin: $p"
+        continue
+      fi
+      log_info "  Updating plugin: $p..."
+      _prod_wp "$ssh_target" "$wp_root" plugin update "$p" >/dev/null 2>&1 || { ok=0; log_warn "  Plugin update failed: $p"; }
+    done
+  else
+    log_info "  All plugins already up to date."
+  fi
+
+  # Update themes individually
+  log_info "Updating themes on PRODUCTION..."
+  local themes
+  themes="$(_prod_wp "$ssh_target" "$wp_root" theme list --update=available --field=name 2>/dev/null | tr -d '\r')"
+  if [ -n "$themes" ]; then
+    local t
+    for t in $themes; do
+      log_info "  Updating theme: $t..."
+      _prod_wp "$ssh_target" "$wp_root" theme update "$t" >/dev/null 2>&1 || { ok=0; log_warn "  Theme update failed: $t"; }
+    done
+  else
+    log_info "  All themes already up to date."
+  fi
   _prod_wp "$ssh_target" "$wp_root" cache flush           >/dev/null 2>&1 || true
 
   # 4) Maintenance mode off (always, even if an update failed — don't strand the site).
   log_info "[4/5] Maintenance mode OFF..."
-  _prod_wp "$ssh_target" "$wp_root" maintenance-mode deactivate >/dev/null 2>&1 || log_warn "could not disable maintenance mode — CHECK THE SITE"
+  _prod_maintenance_off "$ssh_target" "$wp_root" || log_warn "could not disable maintenance mode — CHECK THE SITE"
 
   # Report (reuses the local upgrade report renderer).
   local core_after; core_after="$(_prod_wp "$ssh_target" "$wp_root" core version 2>/dev/null | tr -d '\r')"
   _prod_versions "$ssh_target" "$wp_root" "$dir" after
   _upgrade_report "$client (PRODUCTION)" "$stamp" "$core_before" "$core_after" "$dir" | tee "$dir/report.txt" >&2
 
+  # German client report and PDF compilation for production
+  _client_report_de "$client (PRODUCTION)" "$stamp" "$core_before" "$core_after" "$dir" > "$dir/wartungsbericht.txt"
+  cupsfilter -i text/plain -o document-format=application/pdf "$dir/wartungsbericht.txt" > "$dir/wartungsbericht.pdf" 2>/dev/null || true
+  log_ok "Wartungsbericht (DE): $dir/wartungsbericht.txt (.pdf)"
+
   # 5) Verify the live site responds.
   log_info "[5/5] Verifying production responds..."
   local home code
   home="$(_prod_wp "$ssh_target" "$wp_root" option get home 2>/dev/null | tr -d '\r')"
   code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$home" 2>/dev/null || echo 000)"
+
+  # Send verification email via wp_mail()
+  local admin_email
+  admin_email="$(_prod_wp "$ssh_target" "$wp_root" option get admin_email 2>/dev/null | tr -d '\r')"
+  if [ -n "$admin_email" ]; then
+    log_info "Sending a verification email via wp_mail() to: $admin_email..."
+    # Execute wp_mail() via wp eval. We escape the double quotes for PHP and single quotes for Bash.
+    if _prod_wp "$ssh_target" "$wp_root" eval "exit(wp_mail('$admin_email', '[wpsite] E-Mail-Funktionstest nach Wartung', 'Hallo, dies ist eine automatisierte Test-E-Mail von wpsite, um die Funktion des Mail-Versands (z.B. WP Mail SMTP) auf Ihrer Website nach den durchgeführten Wartungsarbeiten zu verifizieren. Alles laeuft stabil!') ? 0 : 1);" >/dev/null 2>&1; then
+      log_ok "  Verification email sent successfully!"
+    else
+      log_warn "  Test email sending FAILED! Please verify your SMTP plugin settings on the site."
+    fi
+  fi
 
   ssh_close_mux
   trap - EXIT

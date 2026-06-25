@@ -58,3 +58,23 @@ setup() {
   run _upgrade_report acme 20260101_000000 6.5.0 6.5.0 "$BATS_TEST_TMPDIR"
   [[ "$output" == *"(no change)"* ]]
 }
+
+@test "german report: section listing and available updates" {
+  printf 'name,version,update\nakismet,5.0,none\nyoast,20.1,none\n' > "$B"
+  printf 'name,version,update\nakismet,5.3,none\nyoast,20.1,none\n' > "$A"
+  run _report_section_de "$B" "$A"
+  [[ "$output" == *"akismet: 5.0 —> 5.3"* ]]
+  [[ "$output" != *"yoast"* ]]
+  [[ "$output" == *"✓"* ]]
+}
+
+@test "german client report: formats header and client text" {
+  for s in plugins themes; do
+    printf 'name,version,update\n' > "$BATS_TEST_TMPDIR/$s.before.csv"
+    printf 'name,version,update\n' > "$BATS_TEST_TMPDIR/$s.after.csv"
+  done
+  run _client_report_de acme 20260101_123045 6.5.0 6.5.0 "$BATS_TEST_TMPDIR"
+  [[ "$output" == *"01.01.2026 um 12:30 Uhr"* ]]
+  [[ "$output" == *"WARTUNGSBERICHT"* ]]
+  [[ "$output" == *"Keine Änderungen"* ]]
+}

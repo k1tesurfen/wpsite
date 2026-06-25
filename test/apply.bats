@@ -18,6 +18,8 @@ setup() {
   _latest_upgrade_dir() { printf '/tmp/rehearsed'; }   # pretend a rehearsal exists
   curl()             { echo 200; }                     # verify OK by default
   _confirm_prod()    { return 0; }                     # confirmed by default
+  _prod_maintenance_on()  { echo "maintenance ON" >> "$CALLS"; }
+  _prod_maintenance_off() { echo "maintenance OFF" >> "$CALLS"; }
   CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
   # default prod wp stub: record commands, answer the read-only ones
   _prod_wp() {
@@ -25,6 +27,9 @@ setup() {
     case "$*" in
       *"core version"*)   echo "6.5" ;;
       *"option get home"*) echo "https://acme.example" ;;
+      *"option get admin_email"*) echo "admin@example.com" ;;
+      *"plugin list"*field=name*) echo "akismet" ;;
+      *"theme list"*field=name*)  echo "twentytwentyfour" ;;
       *list*)             echo "name,version,update" ;;
     esac
   }
@@ -51,12 +56,13 @@ setup() {
   _backup_one_client() { return 0; }
   run cmd_apply acme
   [ "$status" -eq 0 ]
-  grep -q 'maintenance-mode activate' "$CALLS"
+  grep -q 'maintenance ON'            "$CALLS"
   grep -q 'core update'               "$CALLS"
   grep -q 'core update-db'            "$CALLS"
-  grep -q 'plugin update --all'       "$CALLS"
-  grep -q 'theme update --all'        "$CALLS"
-  grep -q 'maintenance-mode deactivate' "$CALLS"
+  grep -q 'plugin update akismet'     "$CALLS"
+  grep -q 'theme update twentytwentyfour' "$CALLS"
+  grep -q 'maintenance OFF'           "$CALLS"
+  grep -q 'eval.*wp_mail'             "$CALLS"
   [[ "$output" == *"Production upgraded"* ]]
 }
 
@@ -90,6 +96,6 @@ setup() {
   curl() { echo 502; }
   run cmd_apply acme
   [ "$status" -ne 0 ]
-  grep -q 'maintenance-mode deactivate' "$CALLS"   # site not left stranded
+  grep -q 'maintenance OFF'             "$CALLS"   # site not left stranded
   [[ "$output" == *"Rollback point"* ]]
 }

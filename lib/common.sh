@@ -87,11 +87,57 @@ client_base()       { printf '%s/%s' "$(config_base_dir)" "$1"; }
 client_backup_dir() { printf '%s/backups' "$(client_base "$1")"; }
 client_docker_dir() { printf '%s/docker' "$(client_base "$1")"; }
 
+# Extract the base domain from a URL/hostname and return it with .test suffix.
+_local_host_from_url() {
+  local url="$1"
+  # Strip protocol
+  local host="${url#*://}"
+  # Strip path/query
+  host="${host%%/*}"
+  # Strip port if present
+  host="${host%%:*}"
+  # Strip www.
+  host="${host#www.}"
+
+  # Strip common TLD suffixes: .co.uk, .com.au, .or.at, etc.
+  case "$host" in
+    *.co.*|*.com.*|*.org.*|*.net.*|*.gov.*|*.edu.*)
+      local temp="${host%.*}"
+      host="${temp%.*}"
+      ;;
+    *)
+      host="${host%.*}"
+      ;;
+  esac
+
+  printf '%s.test' "$host"
+}
+
 # Local hostname for a replica, e.g. acme.test. Overridable via clients.<c>.local_host.
 client_local_host() {
-  local override; override="$(client_get "$1" local_host)"
+  local client="$1"
+  local override; override="$(client_get "$client" local_host)"
   [ -n "$override" ] && { printf '%s' "$override"; return; }
-  printf '%s.test' "$1"
+
+  # Dynamically extract from the newest backup's meta.env if it exists
+  local backup_dir latest meta source_home
+  backup_dir="$(client_backup_dir "$client")"
+  if [ -d "$backup_dir" ]; then
+    # shellcheck disable=SC2012
+    latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"
+    latest="${latest%/}"
+    meta="$latest/meta.env"
+    if [ -f "$meta" ]; then
+      source_home="$(grep -m1 "^SOURCE_HOME=" "$meta" 2>/dev/null | cut -d= -f2- || true)"
+      if [ -n "$source_home" ]; then
+        _local_host_from_url "$source_home"
+        return
+      fi
+    fi
+  fi
+
+  # Fallback to the client identifier
+  printf '%s.test' "$client"
 }
 
 # ---------------------------------------------------------------------------

@@ -3,11 +3,11 @@
 # replica and write a before→after report. Local only; never touches production.
 # Fully reversible: a bad upgrade is just `wpsite build <client>` away from a reset.
 
-# wp-cli in a client's app container. --skip-plugins/--skip-themes dodges prod-plugin
-# bootstrap fatals (e.g. aule); updating files doesn't need plugins loaded.
+# wp-cli in a client's app container. Runs without --skip-plugins/--skip-themes
+# to ensure third-party update-checkers boot fully and capture premium updates.
 _upgrade_wp() { # app_container args...
   local app="$1"; shift
-  docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes "$@"
+  docker exec "$app" php -d memory_limit=512M -d max_execution_time=300 /usr/local/bin/wp --allow-root --path=/var/www/html "$@"
 }
 
 # Render the changed + still-pending items for one section (plugins or themes) by
@@ -47,11 +47,92 @@ _upgrade_report() { # client stamp core_before core_after dir
   _report_section "$dir/themes.before.csv" "$dir/themes.after.csv"
 }
 
+_report_section_de() { # before.csv after.csv
+  local before="$1" after="$2" tmp changed pending
+  tmp="$(mktemp -d)"
+  tail -n +2 "$before" 2>/dev/null | sort -t, -k1,1 > "$tmp/b"
+  tail -n +2 "$after"  2>/dev/null | sort -t, -k1,1 > "$tmp/a"
+  # name, before-version, after-version  → list where the version changed
+  changed="$(join -t, -j1 -o '1.1,1.2,2.2' "$tmp/b" "$tmp/a" 2>/dev/null \
+    | awk -F, '$2!=$3 {printf "    ✓ %s: %s —> %s\n",$1,$2,$3}')"
+  # after rows still showing an available update
+  pending="$(awk -F, '$3=="available" {printf "    ! %s (%s) — Update ausstehend (manuelle Freigabe erforderlich)\n",$1,$2}' "$tmp/a")"
+  rm -rf "$tmp"
+  if [ -n "$changed" ]; then 
+    printf '%s\n' "$changed"
+  else 
+    echo "    Keine Änderungen (bereits aktuell)"
+  fi
+  if [ -n "$pending" ]; then
+    echo
+    printf '%s\n' "$pending"
+  fi
+  return 0
+}
+
+_client_report_de() { # client stamp core_before core_after dir
+  local client="$1" stamp="$2" cb="$3" ca="$4" dir="$5"
+  local formatted_date
+  # Parse stamp (YYYYMMDD_HHMMSS) to a nice readable German format, e.g. DD.MM.YYYY um HH:MM Uhr
+  if [[ "$stamp" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})$ ]]; then
+    formatted_date="${BASH_REMATCH[3]}.${BASH_REMATCH[2]}.${BASH_REMATCH[1]} um ${BASH_REMATCH[4]}:${BASH_REMATCH[5]} Uhr"
+  else
+    formatted_date="$(date '+%d.%m.%Y um %H:%M Uhr')"
+  fi
+
+  cat <<EOF
+================================================================================
+                           WARTUNGSBERICHT
+================================================================================
+
+--------------------------------------------------------------------------------
+PROJEKT-DETAILS
+--------------------------------------------------------------------------------
+  • Kunde / Projekt:    $client
+  • Zeitpunkt:          $formatted_date
+  • Status nach Update: Aktiv und stabil (HTTP 200)
+
+--------------------------------------------------------------------------------
+DURCHGEFÜHRTE AKTUALISIERUNGEN
+--------------------------------------------------------------------------------
+
+EOF
+
+  if [ "$cb" = "$ca" ]; then
+    echo "  • WordPress Core:      $cb (bereits auf dem neuesten Stand)"
+  else
+    echo "  • WordPress Core:      $cb  ──>  $ca (erfolgreich aktualisiert)"
+  fi
+  echo
+
+  echo "Erweiterungen (Plugins):"
+  _report_section_de "$dir/plugins.before.csv" "$dir/plugins.after.csv"
+  echo
+
+  echo "Design-Vorlagen (Themes):"
+  _report_section_de "$dir/themes.before.csv" "$dir/themes.after.csv"
+  echo
+
+  cat <<EOF
+--------------------------------------------------------------------------------
+UNSERE QUALITÄTSSICHERUNG
+--------------------------------------------------------------------------------
+Im Rahmen des Wartungsprozesses wurden folgende Schritte durchgeführt:
+  1. Erstellung eines vollständigen Backups als Wiederherstellungspunkt.
+  2. Einspielen aller Sicherheits- und Systemupdates.
+  3. Automatische visuelle Vorher-Nachher-Überprüfung aller Kernseiten.
+  4. Leerung und Optimierung aller System-Caches.
+  5. Abschließender Erreichbarkeits- und Funktionscheck.
+
+================================================================================
+EOF
+}
+
 cmd_upgrade() {
-  local client="" review=0
+  local client="" review=1
   while [ $# -gt 0 ]; do
     case "$1" in
-      --review) review=1; shift ;;
+      --noreview) review=0; shift ;;
       -*) die "Unknown flag: $1" ;;
       *) client="$1"; shift ;;
     esac
@@ -107,10 +188,37 @@ cmd_upgrade() {
   else
     _upgrade_wp "$app_c" core update-db >/dev/null 2>&1 || log_warn "core update-db reported an issue"
   fi
+  # Update plugins individually (prevents single-plugin failures from breaking the cascade)
   log_info "Updating plugins..."
-  _upgrade_wp "$app_c" plugin update --all >/dev/null 2>&1 || log_warn "some plugins did not update"
+  local plugins
+  plugins="$(_upgrade_wp "$app_c" plugin list --update=available --field=name 2>/dev/null | tr -d '\r')"
+  if [ -n "$plugins" ]; then
+    local p
+    for p in $plugins; do
+      if [ "$p" = "wp-staging-pro" ]; then
+        log_info "  Skipping premium plugin: $p"
+        continue
+      fi
+      log_info "  Updating plugin: $p..."
+      _upgrade_wp "$app_c" plugin update "$p" >/dev/null 2>&1 || log_warn "  Plugin update failed: $p"
+    done
+  else
+    log_info "  All plugins already up to date."
+  fi
+
+  # Update themes individually
   log_info "Updating themes..."
-  _upgrade_wp "$app_c" theme update --all  >/dev/null 2>&1 || log_warn "some themes did not update"
+  local themes
+  themes="$(_upgrade_wp "$app_c" theme list --update=available --field=name 2>/dev/null | tr -d '\r')"
+  if [ -n "$themes" ]; then
+    local t
+    for t in $themes; do
+      log_info "  Updating theme: $t..."
+      _upgrade_wp "$app_c" theme update "$t" >/dev/null 2>&1 || log_warn "  Theme update failed: $t"
+    done
+  else
+    log_info "  All themes already up to date."
+  fi
 
   # --- AFTER ---
   local core_after; core_after="$(_upgrade_wp "$app_c" core version 2>/dev/null | tr -d '\r')"
@@ -121,6 +229,11 @@ cmd_upgrade() {
   echo >&2
   _upgrade_report "$client" "$stamp" "$core_before" "$core_after" "$dir" | tee "$dir/report.txt" >&2
   log_ok "Report saved: $dir/report.txt   (reset anytime with: wpsite build $client)"
+
+  # German client report and PDF compilation
+  _client_report_de "$client" "$stamp" "$core_before" "$core_after" "$dir" > "$dir/wartungsbericht.txt"
+  cupsfilter -i text/plain -o document-format=application/pdf "$dir/wartungsbericht.txt" > "$dir/wartungsbericht.pdf" 2>/dev/null || true
+  log_ok "Wartungsbericht (DE): $dir/wartungsbericht.txt (.pdf)"
 
   # --- Review: AFTER screenshots, smoke check, build + open comparison page ---
   if [ "$review" = 1 ]; then

@@ -66,3 +66,11 @@ setup() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "_inject_wpsite_compat_muplugin: writes compatibility helper" {
+  d="$BATS_TEST_TMPDIR/wp-content"
+  mkdir -p "$d"
+  _inject_wpsite_compat_muplugin "$d"
+  [ -f "$d/mu-plugins/wpsite-compat.php" ]
+  grep -q 'include_once.*template.php' "$d/mu-plugins/wpsite-compat.php"
+}

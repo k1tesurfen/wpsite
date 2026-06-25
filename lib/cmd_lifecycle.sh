@@ -26,8 +26,25 @@ cmd_start() {
 cmd_stop() {
   local client="${1:-}"
   config_require
-  require_client "$client"
   require docker
+
+  if [ "$client" = "--all" ]; then
+    log_info "Stopping ALL running replicas..."
+    local c d project
+    for c in $(config_clients); do
+      d="$(client_docker_dir "$c")"
+      project="wpsite_${c}"
+      if [ -f "$d/docker-compose.yml" ]; then
+        log_info "Stopping '$c' replica (data preserved)..."
+        ( cd "$d" && docker compose -p "$project" stop )
+        log_ok "Stopped '$c'."
+      fi
+    done
+    log_ok "Stopped all built replicas."
+    return 0
+  fi
+
+  require_client "$client"
 
   local docker_dir project
   docker_dir="$(client_docker_dir "$client")"

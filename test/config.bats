@@ -41,6 +41,28 @@ setup() {
   [ "$output" = "baker-custom.test" ]
 }
 
+@test "client_local_host dynamically extracts from meta.env when backup exists" {
+  local d
+  d="$(client_backup_dir acme)/20260101_120000"
+  mkdir -p "$d"
+  echo "SOURCE_HOME=https://www.buy-my-site.co.uk" > "$d/meta.env"
+  
+  run client_local_host acme
+  [ "$output" = "buy-my-site.test" ]
+  
+  # Clean up the mocked backup directory
+  rm -rf "$(client_base acme)"
+}
+
+@test "_local_host_from_url parses complex URLs" {
+  run _local_host_from_url "https://buy-my-site.de"
+  [ "$output" = "buy-my-site.test" ]
+  run _local_host_from_url "http://sub.domain.co.uk/some/path?query=1"
+  [ "$output" = "sub.domain.test" ]
+  run _local_host_from_url "https://www.example.com"
+  [ "$output" = "example.test" ]
+}
+
 @test "config_has_client: true for known, false for unknown" {
   run config_has_client acme
   [ "$status" -eq 0 ]

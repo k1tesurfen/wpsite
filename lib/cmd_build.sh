@@ -176,6 +176,29 @@ _ensure_wp_cli() { # app_container
   ' >/dev/null 2>&1
 }
 
+# Write the compatibility mu-plugin into a replica's wp-content (creating mu-plugins/ if needed).
+# This prevents plugins (like aule) that globally call admin-only functions from breaking WP-CLI.
+_inject_wpsite_compat_muplugin() { # wp_content_dir
+  local d="$1/mu-plugins"
+  mkdir -p "$d"
+  cat <<'EOF' > "$d/wpsite-compat.php"
+<?php
+/**
+ * Plugin Name: wpsite Compatibility Layer
+ * Description: Fixes bad coding in third-party plugins that fatal under WP-CLI.
+ * Author: wpsite
+ * Version: 1.0.0
+ */
+if (!defined('ABSPATH')) { exit; }
+
+if (defined('WP_CLI') && WP_CLI) {
+    if (!function_exists('add_settings_error')) {
+        include_once ABSPATH . 'wp-admin/includes/template.php';
+    }
+}
+EOF
+}
+
 # Add `127.0.0.1 <host>` to /etc/hosts if not already an ACTIVE entry.
 # Two subtleties this guards against:
 #  - Other tools (e.g. the "Local" app) may leave the file without a trailing
@@ -465,6 +488,9 @@ cmd_build() {
   # Trap ALL outgoing mail: drop in the mu-plugin that routes wp_mail() to Mailpit.
   # (Mail/SMTP plugins that could bypass it are deactivated in _sanitize_plugins.)
   _inject_mailpit_muplugin wp-content
+
+  # Inject custom compatibility helpers to avoid bootstrap fatals on active plugins (like aule).
+  _inject_wpsite_compat_muplugin wp-content
 
   # Placeholder mode: regenerate blank media from the map (run from the docker dir
   # so the wp-content/uploads/... paths resolve correctly — no cd into uploads).
