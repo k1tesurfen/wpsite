@@ -93,3 +93,47 @@ echo __REACHED__"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *__REACHED__* ]]
 }
+
+# --- cloud sync helpers (set -e bare-statement guards) ---------------------
+
+# Strict-mode runner with a minimal config + the cloud lib loaded.
+cstrict() {
+  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+    printf "base_dir: %s/root\nclients:\n  acme:\n    ssh: u@h\n    wp_root: /v\n" "$TMP" > "$TMP/c.yml"
+    export WPSITE_CONFIG="$TMP/c.yml"
+    source "$REPO/lib/common.sh"
+    source "$REPO/lib/cloud.sh"
+    source "$REPO/lib/cmd_backup.sh"
+    '"$1"'
+    echo __REACHED__'
+}
+
+@test "_cloud_sync_client: cloud unconfigured -> warns, does not abort" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_cloud_sync_client acme'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_local_backup_ids / _cloud_backup_ids: no dirs -> do not abort" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_local_backup_ids acme; _cloud_backup_ids acme'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_audit_log / _manifest_add / _manifest_remove: bare statements safe" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_manifest_add acme 20260101_120000; _manifest_remove acme 20260101_120000; _audit_log acme push 20260101_120000'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_backup_autoprune: cloud unmounted -> warns, does not abort" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_backup_autoprune acme'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_backup_post_cloud: no cloud configured -> does not abort" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_backup_post_cloud acme 20260101_120000'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}

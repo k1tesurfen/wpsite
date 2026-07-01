@@ -19,6 +19,8 @@ export WPSITE_ROOT
 
 # shellcheck source=lib/common.sh
 source "$WPSITE_ROOT/lib/common.sh"
+# shellcheck source=lib/cloud.sh
+source "$WPSITE_ROOT/lib/cloud.sh"   # shared cloud helpers (not a cmd_*.sh, so explicit)
 for _f in "$WPSITE_ROOT"/lib/cmd_*.sh; do
   # shellcheck source=/dev/null
   source "$_f"
@@ -37,24 +39,41 @@ Commands:
   backup  <client>    Snapshot a remote site (media → placeholders to stay small)
           --all       …back up every configured client, in sequence
           --full      …include real media files instead of placeholders
+          --persist   …mark the new backup permanent (exempt from rolling prune)
+  backup sync [<client>]   Reconcile local backups with the cloud (cloud = truth;
+          --all --dry-run   no arg / --all syncs every client)
+  backup persist <client> <id> [--off]   Promote/demote an existing backup to permanent
   build   <client>    (Re)build & run a backup as a local replica (newest by default)
           --backup <id>   …use a specific backup (see: wpsite list <client>)
-  start   <client>    Start a stopped replica (keeps data)
-  stop    <client>    Stop a running replica (keeps data, restartable)
-          --all       …stop all running client replicas
+  client  add [name]  Onboard a new SSH-backed client (wizard): install your SSH key
+                      (ssh-copy-id), write the config entry, then run 'test'
+          edit <name>    …change a client's fields (interactive or via --ssh/--wp-root/…)
+          remove <name>  …remove a client (+replica); --purge also deletes its backups
+  new     [name]      Create a fresh blank dev site (no name → wizard)
+          --wp <ver> --php <ver> --host <h>   …pin versions / host (default latest/8.2)
+  clone   <client> <devname>   Create a dev site from a client (real media by default)
+          --backup <id>   …from an existing backup;  --light   …placeholder media
+  inject  <devsite>   Live-mount a local plugin into a dev site (default: ~/git/aule)
+          --from <path> --slug <name>   …mount any plugin checkout under any slug
+          --activate [--network]        …activate after mount (--network = multisite-wide)
+  start   <site>      Start a stopped replica or dev site (keeps data)
+  stop    <site>      Stop a running replica or dev site (keeps data, restartable)
+          --all       …stop all running replicas + dev sites
   upgrade <client>    Update core/plugins/themes on the replica + write a report (with visual review)
           --noreview      …skip taking screenshots & opening comparison page
   review  <client>    Re-open the latest upgrade comparison page in the browser
   apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
                       typed confirmation; irreversible — rehearse first)
-  destroy <client>    Remove a replica (containers + DB volume + files)
-  prune   <client>    Delete old backups (--all for every client; --keep N,
-          --all           --older-than Nd, --dry-run, --yes; default --keep 5)
+  destroy <site>      Remove a replica or dev site (containers + DB volume + files)
+  prune   <client>    Delete old backups from local + cloud (default: keep newest
+          --all           keep_backups, default 4; skips -permanent). Flags: --keep N,
+          <id>            --older-than Nd, --dry-run, --yes. Give a <backup-id> to
+                          delete just that one (even if permanent).
   proxy   <action>    Shared reverse proxy + wildcard DNS for running all replicas
                       at once: up | down | status | install-dns
   mail    <action>    Shared Mailpit that traps all replica email: up | down | status
-  list    [client]    List clients + backups (or one client's backups in detail)
-  status              Show running replicas and their URLs
+  list    [site]      List clients + backups + dev sites (or one site's detail)
+  status              Show running replicas + dev sites and their URLs
   doctor              Verify dependencies and environment
   test    <client>    Verify remote host connection, directories, and CLI/DB readiness
 
@@ -84,6 +103,10 @@ main() {
   case "$cmd" in
     backup)  cmd_backup "$@" ;;
     build)   cmd_build "$@" ;;
+    client)  cmd_client "$@" ;;
+    new)     cmd_new "$@" ;;
+    clone)   cmd_clone "$@" ;;
+    inject)  cmd_inject "$@" ;;
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
     upgrade) cmd_upgrade "$@" ;;

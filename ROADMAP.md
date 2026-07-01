@@ -7,11 +7,13 @@ core/plugin/theme upgrades on the replica and applies the validated result to
 production in place.
 
 ```
+wpsite client add|edit|remove <name>       # manage clients (add wizard: ssh-copy-id + test)
 wpsite backup  <client> [--full] [--all]   # remote → local artifacts
 wpsite build   <client>                    # artifacts → running Docker replica
 wpsite start | stop | destroy <client>     # lifecycle of a built replica
 wpsite list | status | doctor              # introspection + preflight
-wpsite prune   <client>|--all [--keep N] [--older-than Nd] [--dry-run] [--yes]
+wpsite prune   <client>|--all [<id>] [--keep N] [--older-than Nd] [--dry-run] [--yes]
+wpsite backup sync [<client>|--all] [--dry-run]   # mirror local ↔ cloud (Drive)
 wpsite upgrade <client> [--review]         # rehearse the upgrade on the replica
 wpsite apply   <client>                    # re-run the validated upgrade ON PRODUCTION
 wpsite proxy   up|down|status|install-dns  # shared Traefik proxy + wildcard DNS
@@ -122,10 +124,28 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
   (full teardown), `list` (+ detail), `status`, `doctor`. Teardown passes
   `-p <project>` so the named DB volume is actually wiped.
 - `--backup <id>` selection (default newest).
-- `wpsite prune` — retention by `--keep N` / `--older-than Nd`, preview + confirm by
-  default. Tested.
+- `wpsite prune` — rolling retention (default keep newest `keep_backups`/4, skipping
+  `-permanent`), `--keep N` / `--older-than Nd`, single-backup form `prune <client> <id>`,
+  preview + confirm by default. Prunes local + cloud together. Tested.
+- **Cloud backup sync — ✅ done.** Mirror local backups to a mounted Google Drive folder
+  (cloud = single source of truth). `backup sync`, auto-push + rolling auto-prune after
+  each `backup`, manifest-based new-vs-deleted detection, `-permanent` backups (`--persist`
+  / `backup persist`) exempt from prune with tolerant `--backup` id resolution. macOS-only
+  (the Drive mount is a filesystem path). See CLAUDE.md "Cloud backup sync".
 - Consistent `log_info/ok/warn/error/debug` + `die`; `--verbose`.
 - `install.sh` symlink installer. (Homebrew formula skipped by choice.)
+- **`wpsite client add|edit|remove` — ✅ done.** Client lifecycle in the config.
+  **add:** onboarding wizard — prompts name/ssh/wp_root (+ cloud_dir when cloud sync is
+  on, since its default can't be derived before the first backup, + gated advanced
+  overrides), writes the entry via `client_set` (`yq -i`, comment-preserving, appended at
+  the end of `clients:`), installs the SSH key (`ssh-copy-id`, with a manual
+  `authorized_keys` fallback since macOS ships none), then runs `wpsite test` — a failed
+  test only warns and keeps the entry. **edit:** interactive (Enter keeps each current
+  value) or flag-driven field changes, `--unset` for optionals, re-tests only when
+  ssh/wp_root changed; rename intentionally unsupported. **remove:** tears down the
+  replica + drops the config entry, keeps local backups unless `--purge`, never touches
+  cloud; typed-name confirm for `--purge`, `[y/N]` otherwise. Scriptable via flags for the
+  GUI. `test/client.bats`.
 
 ### Upgrade workflow — the quarterly retainer
 

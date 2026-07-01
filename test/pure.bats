@@ -27,6 +27,34 @@ setup() {
   [ "$output" = "wordpress:latest" ]
 }
 
+@test "_wp_image_candidates: ordered, WP version kept before PHP" {
+  run _wp_image_candidates 7.0 8.1
+  [ "${lines[0]}" = "wordpress:7.0-php8.1-apache" ]
+  [ "${lines[1]}" = "wordpress:7.0-apache" ]
+  [ "${lines[2]}" = "wordpress:php8.1-apache" ]
+  [ "${lines[3]}" = "wordpress:latest" ]
+}
+
+# The resolver probes via `docker manifest inspect`; we stub `docker` so no real
+# registry call happens (still side-effect free).
+@test "_resolve_wp_image: picks the exact prod tag when it's published" {
+  docker() { [ "$3" = "wordpress:7.0-php8.3-apache" ]; }
+  run _resolve_wp_image 7.0 8.3
+  [ "$output" = "wordpress:7.0-php8.3-apache" ]
+}
+
+@test "_resolve_wp_image: falls back to <wp>-apache when the PHP combo is missing" {
+  docker() { [ "$3" = "wordpress:7.0-apache" ]; }   # the drfroehlich case (7.0 + php8.1)
+  run _resolve_wp_image 7.0 8.1
+  [ "$output" = "wordpress:7.0-apache" ]
+}
+
+@test "_resolve_wp_image: returns the preferred tag when nothing resolves (offline)" {
+  docker() { return 1; }
+  run _resolve_wp_image 7.0 8.1
+  [ "$output" = "wordpress:7.0-php8.1-apache" ]
+}
+
 @test "expand_tilde: expands leading ~/" {
   run expand_tilde "~/websites"
   [ "$output" = "$HOME/websites" ]
@@ -73,4 +101,19 @@ setup() {
   _inject_wpsite_compat_muplugin "$d"
   [ -f "$d/mu-plugins/wpsite-compat.php" ]
   grep -q 'include_once.*template.php' "$d/mu-plugins/wpsite-compat.php"
+}
+
+@test "_is_backup_id: matches timestamps + optional -permanent, rejects junk" {
+  _is_backup_id 20260101_120000
+  _is_backup_id 20260101_120000-permanent
+  run _is_backup_id 20260101            ; [ "$status" -ne 0 ]
+  run _is_backup_id 20260101_120000.tmp ; [ "$status" -ne 0 ]
+  run _is_backup_id fresh               ; [ "$status" -ne 0 ]
+  run _is_backup_id ''                  ; [ "$status" -ne 0 ]
+}
+
+@test "_is_persistent_backup: true only for the -permanent suffix" {
+  _is_persistent_backup 20260101_120000-permanent
+  _is_persistent_backup /some/path/20260101_120000-permanent
+  run _is_persistent_backup 20260101_120000 ; [ "$status" -ne 0 ]
 }

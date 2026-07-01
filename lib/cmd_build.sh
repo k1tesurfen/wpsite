@@ -20,6 +20,47 @@ _wp_image_tag() { # wp_version php_version
   fi
 }
 
+# Candidate image tags in priority order. The exact prod match is ideal, but the
+# official wordpress image doesn't publish every WP×PHP combo (e.g. WP 7.0 ships
+# only php8.2/8.3, not php8.1). For a local replica the WP *core* version matters
+# far more than the PHP minor, so we keep WP and let PHP float before the reverse.
+_wp_image_candidates() { # wp php
+  local wp="$1" php="$2"
+  if [ -n "$wp" ] && [ -n "$php" ]; then echo "wordpress:${wp}-php${php}-apache"; fi
+  if [ -n "$wp" ];                  then echo "wordpress:${wp}-apache"; fi
+  if [ -n "$php" ];                 then echo "wordpress:php${php}-apache"; fi
+  echo "wordpress:latest"
+}
+
+# Resolve to the first candidate that actually exists on the registry (probed with
+# `docker manifest inspect`, which doesn't pull). Falls back to the preferred tag
+# when probing can't run (offline / no docker) so behaviour degrades to the old
+# pin-and-let-compose-complain path rather than silently picking `latest`.
+_resolve_wp_image() { # wp php
+  local wp="$1" php="$2" tag first=""
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    [ -n "$first" ] || first="$tag"
+    if docker manifest inspect "$tag" >/dev/null 2>&1; then
+      printf '%s' "$tag"; return 0
+    fi
+  done < <(_wp_image_candidates "$wp" "$php")
+  printf '%s' "$first"
+}
+
+# Best-effort production table prefix from a DB dump, for backups that predate
+# TABLE_PREFIX capture. Keys off the GLOBAL `<prefix>users` table (one per install
+# even on multisite, unlike per-blog `<prefix>N_options`); the backtick anchor
+# excludes `usermeta`. Empty when undetectable. Run via $() — set -e safe.
+_detect_table_prefix() { # db_sql_file
+  local f="$1"
+  [ -f "$f" ] || return 0
+  # Backticks here are literal SQL identifier quotes, not command substitution.
+  # shellcheck disable=SC2016
+  grep -m1 -oE 'CREATE TABLE `[^`]+users`' "$f" 2>/dev/null \
+    | sed -E 's/^CREATE TABLE `(.*)users`$/\1/' || true
+}
+
 # First available system font for placeholder labels (empty = none → no text).
 # ImageMagick on macOS has no default font configured, so we must pass one.
 _placeholder_font() {
@@ -362,7 +403,10 @@ _ensure_local_dns() { # host
 # container joins the shared proxy network so Traefik can reach it by name
 # (wp_<client>_app). db stays on the project's default network only.
 _render_compose() { # db_container app_container image client local_host ms_php
-  local db_c="$1" app_c="$2" image="$3" ms_php="${6:-}"
+  local db_c="$1" app_c="$2" image="$3" ms_php="${6:-}" table_prefix="${7:-}"
+  # Match the imported DB's prefix; omitted → image default (wp_).
+  local prefix_line=""
+  [ -n "$table_prefix" ] && prefix_line="      WORDPRESS_TABLE_PREFIX: \"$table_prefix\""
   # Standard dev defines + optional multisite constants, all indented 8 spaces for
   # the WORDPRESS_CONFIG_EXTRA YAML block scalar.
   local extra="        define('WP_DEBUG_LOG', true);
@@ -396,6 +440,7 @@ services:
       WORDPRESS_DB_USER: wordpress
       WORDPRESS_DB_PASSWORD: wordpress
       WORDPRESS_DB_NAME: wordpress
+$prefix_line
       # Dev debugging: WP_DEBUG on, errors logged to wp-content/debug.log (not shown
       # on the page, so layouts aren't broken by prod's deprecation spam).
       WORDPRESS_DEBUG: "1"
@@ -430,11 +475,9 @@ cmd_build() {
   require_client "$client"
   require docker
 
-  local backup_dir docker_dir local_host local_url
+  local backup_dir local_host
   backup_dir="$(client_backup_dir "$client")"
-  docker_dir="$(client_docker_dir "$client")"
   local_host="$(client_local_host "$client")"
-  local_url="http://$local_host"
 
   [ -d "$backup_dir" ] && [ -n "$(ls -A "$backup_dir" 2>/dev/null)" ] \
     || die "No backups found for $client (run: wpsite backup $client)"
@@ -442,7 +485,7 @@ cmd_build() {
   # Pick the backup: a specific one via --backup <id>, else the newest.
   local latest
   if [ -n "$backup_id" ]; then
-    latest="$backup_dir/${backup_id%/}"
+    latest="$(resolve_backup_dir "$client" "${backup_id%/}")"
     [ -d "$latest" ] || die "Backup '$backup_id' not found for $client. See: wpsite list $client"
   else
     # ls -t sorts by mtime; backup dirs are timestamps so no odd-filename risk.
@@ -454,6 +497,20 @@ cmd_build() {
     || die "Backup at $latest is incomplete (missing db.sql or wp-content.tar.gz)."
   log_info "Using backup: $(basename "$latest")$([ -z "$backup_id" ] && echo ' (newest)')"
 
+  _build_from_backup "$latest" "$client" "$local_host" "$(client_get "$client" deactivate_plugins)"
+}
+
+# Given a chosen backup dir, a target site name and its local host, produce a
+# running replica. Shared by `build` (target = the client) and `clone` (target =
+# a new dev site). `target` drives the compose project / container / dir / route
+# names; deactivate_slugs is the source client's clients.<c>.deactivate_plugins.
+# ms_ns (5th, optional) namespaces a MULTISITE clone's hosts under <ms_ns>.test so it
+# can't collide with the client's own build — empty for `build` (legacy TLD swap).
+_build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
+  local latest="$1" target="$2" local_host="$3" extra_deactivate="${4:-}" ms_ns="${5:-}"
+  local local_url="http://$local_host" docker_dir
+  docker_dir="$(target_docker_dir "$target")"
+
   # A full backup ships real media and no media_map.txt; placeholder mode has the
   # map and needs ImageMagick + ffmpeg to regenerate assets.
   local im="" placeholder_mode=0
@@ -464,13 +521,13 @@ cmd_build() {
     [ -n "$im" ] || die "ImageMagick required for placeholder backups. Install: brew install imagemagick"
   fi
 
-  local project="wpsite_${client}" db_c="wp_${client}_db" app_c="wp_${client}_app"
+  local project="wpsite_${target}" db_c="wp_${target}_db" app_c="wp_${target}_app"
 
   # --- Tear down any existing replica, then reset the working dir ---
   # Use the project name so this actually stops the old containers + wipes the DB
   # volume (a fresh import must not inherit stale data). Runs even if the dir is
   # gone, so orphaned containers from a deleted dir still get cleaned.
-  log_info "Tearing down any existing '$client' replica..."
+  log_info "Tearing down any existing '$target' replica..."
   _compose_down "$project" "$docker_dir"
   rm -rf "$docker_dir"
   mkdir -p "$docker_dir"
@@ -510,14 +567,33 @@ cmd_build() {
   if [ -z "$wp_version" ]; then
     wp_version="$(grep -m1 -oE "wp_version', '[0-9.]+" db.sql | cut -d"'" -f3 || true)"
   fi
-  local image; image="$(_wp_image_tag "$wp_version" "$php_version")"
+
+  # Production table prefix → replica wp-config (via WORDPRESS_TABLE_PREFIX). Without
+  # this, the image defaults to wp_ while the imported DB may use a custom prefix
+  # (e.g. hfm3_), making WP/wp-cli see "not installed" and the URL rewrite no-op.
+  local table_prefix
+  table_prefix="$(_meta_get TABLE_PREFIX "$meta")"
+  if [ -z "$table_prefix" ]; then
+    table_prefix="$(_detect_table_prefix db.sql)"
+    [ -n "$table_prefix" ] && log_warn "TABLE_PREFIX missing from metadata; detected '$table_prefix' from db.sql (re-backup to capture it reliably)."
+  fi
+  [ -n "$table_prefix" ] && [ "$table_prefix" != "wp_" ] && log_info "Production table prefix: $table_prefix"
+
+  local preferred image
+  preferred="$(_wp_image_tag "$wp_version" "$php_version")"
+  image="$(_resolve_wp_image "$wp_version" "$php_version")"
+  if [ "$image" != "$preferred" ]; then
+    log_warn "Prod image $preferred isn't published — using closest available: $image"
+  fi
   log_info "WordPress image: $image"
 
   # --- Multisite: drive the local host + wp-config from the captured network ---
   local is_ms ms_php="" sites_csv="$latest/sites.csv"
   is_ms="$(_meta_get MULTISITE "$meta")"
   if [ "$is_ms" = "1" ] && [ -f "$sites_csv" ]; then
-    local_host="$(_swap_tld "$(_ms_main_domain "$sites_csv")")"   # main site's .test host
+    local main_prod; main_prod="$(_ms_main_domain "$sites_csv")"
+    # main site's local host — namespaced under <ms_ns>.test for a clone, else TLD-swap.
+    local_host="$(_ms_local_host "$main_prod" "$main_prod" "$ms_ns")"
     local_url="http://$local_host"
     ms_php="$(_ms_config_extra "$local_host" "$(_meta_get SUBDOMAIN_INSTALL "$meta")")"
     log_info "Multisite network — main site: $local_url ($(tail -n +2 "$sites_csv" | grep -c . ) subsites)"
@@ -527,9 +603,9 @@ cmd_build() {
 
   # Local DNS: with wildcard *.test in place (wpsite proxy install-dns) nothing is
   # needed; otherwise fall back to a per-host /etc/hosts entry (sudo).
-  if [ "$is_ms" = "1" ]; then _ms_ensure_dns "$sites_csv"; else _ensure_local_dns "$local_host"; fi
+  if [ "$is_ms" = "1" ]; then _ms_ensure_dns "$sites_csv" "$ms_ns"; else _ensure_local_dns "$local_host"; fi
 
-  _render_compose "$db_c" "$app_c" "$image" "$client" "$local_host" "$ms_php" > docker-compose.yml
+  _render_compose "$db_c" "$app_c" "$image" "$target" "$local_host" "$ms_php" "$table_prefix" > docker-compose.yml
 
   # Start the shared infra (proxy + Mailpit) — both create/use the proxy network
   # the compose file joins — BEFORE bringing the replica up.
@@ -541,7 +617,7 @@ cmd_build() {
 
   # Register the replica's route with the proxy (Traefik picks it up via file-watch).
   # Multisite lists every subsite domain; single-site is the one host.
-  if [ "$is_ms" = "1" ]; then _ms_write_route "$client" "$sites_csv"; else _proxy_write_route "$client" "$local_host"; fi
+  if [ "$is_ms" = "1" ]; then _ms_write_route "$target" "$sites_csv" "$ms_ns"; else _proxy_write_route "$target" "$local_host"; fi
 
   # Connect over TCP (-h127.0.0.1), not the default socket: the image creates the
   # user as 'wordpress'@'%' (TCP), not @'localhost' (socket), so a socket login is
@@ -557,11 +633,11 @@ cmd_build() {
   log_info "Importing database..."
   docker exec -i "$db_c" mariadb -h127.0.0.1 -uwordpress -pwordpress wordpress < db.sql
 
-  # Multisite: fix wp_site/wp_blogs domains with raw SQL FIRST, so wp-cli can then
-  # bootstrap the network (the domains must match DOMAIN_CURRENT_SITE in wp-config).
+  # Multisite: fix <prefix>site/<prefix>blogs domains with raw SQL FIRST, so wp-cli
+  # can then bootstrap the network (domains must match DOMAIN_CURRENT_SITE in wp-config).
   if [ "$is_ms" = "1" ]; then
-    log_info "Rewriting network domains (wp_site/wp_blogs)..."
-    _ms_fix_domains "$db_c" "$local_host" "$sites_csv" >/dev/null 2>&1 || log_warn "network domain SQL fix had issues"
+    log_info "Rewriting network domains (${table_prefix:-wp_}site/${table_prefix:-wp_}blogs)..."
+    _ms_fix_domains "$db_c" "$local_host" "$sites_csv" "$ms_ns" "$table_prefix" >/dev/null 2>&1 || log_warn "network domain SQL fix had issues"
   fi
 
   # --- Rewrite production domain → local replica URL (uses captured URLs) ---
@@ -570,8 +646,8 @@ cmd_build() {
     log_warn "Site may still reference production URLs."
   elif [ "$is_ms" = "1" ]; then
     log_info "Rewriting content URLs across the network..."
-    _ms_rewrite_content "$app_c" "$sites_csv"
-    _sanitize_plugins "$app_c" "$(client_get "$client" deactivate_plugins)"
+    _ms_rewrite_content "$app_c" "$sites_csv" "$ms_ns"
+    _sanitize_plugins "$app_c" "$extra_deactivate"
     # Create the known admin first, THEN grant network super-admin (promotion needs
     # the user to exist) — gives a working network-admin login on the replica.
     _set_known_admin "$app_c" "$local_url"
@@ -586,9 +662,21 @@ cmd_build() {
     else
       log_warn "No source URL in metadata; skipping domain rewrite (older backup?)."
     fi
-    _sanitize_plugins "$app_c" "$(client_get "$client" deactivate_plugins)"
+    _sanitize_plugins "$app_c" "$extra_deactivate"
     _set_known_admin "$app_c" "$local_url"
   fi
 
-  log_ok "SUCCESS: $local_url is live."
+  # Real liveness check — WordPress must see itself as installed. Catches a table
+  # prefix mismatch (the symptom: wp-cli prints "site not installed / Found
+  # installation with table prefix: …"), which would otherwise sail past all the
+  # `|| true`-guarded steps above and report a false success.
+  if docker exec "$app_c" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
+       core is-installed >/dev/null 2>&1; then
+    log_ok "SUCCESS: $local_url is live."
+  else
+    log_warn "Build finished, but WordPress does not report as installed — the replica is likely broken."
+    log_warn "Most common cause: table-prefix mismatch between wp-config and the imported DB."
+    log_warn "If this site predates prefix capture, run a fresh 'wpsite backup $target' and rebuild."
+    return 1
+  fi
 }

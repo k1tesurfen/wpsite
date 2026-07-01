@@ -63,8 +63,8 @@ EOF
   [ "$status" -eq 0 ]
   grep -q "compose -p wpsite_acme stop" "$CALLS"
   ! grep -q "compose -p wpsite_baker stop" "$CALLS"
-  [[ "$output" == *"Stopping 'acme' replica"* ]]
-  [[ "$output" == *"Stopped all built replicas"* ]]
+  [[ "$output" == *"Stopping 'acme'"* ]]
+  [[ "$output" == *"Stopped all built sites"* ]]
 }
 
 @test "start: fails when no compose file exists" {
@@ -74,7 +74,7 @@ EOF
   
   run cmd_start acme
   [ "$status" -ne 0 ]
-  [[ "$output" == *"No replica built"* ]]
+  [[ "$output" == *"Nothing built"* ]]
 }
 
 @test "start: runs docker compose up when compose file exists" {

@@ -37,6 +37,7 @@ case "$*" in
   *"site list"*)         printf 'blog_id,domain,path,url\n1,x.de,/,https://x.de/\n2,shop.x.de,/,https://shop.x.de/\n' ;;
   *siteurl*) echo "https://x.de";; *home*) echo "https://x.de";;
   *"core version"*) echo "6.4";;
+  *"config get table_prefix"*) echo "hfm3_";;
 esac
 EOF
   cat > "$STUB/identify" <<'EOF'
@@ -50,8 +51,8 @@ EOF
 # STUB_MULTISITE (env) drives the stubbed is_multisite().
 run_backup() {
   local mode="placeholder"; [ "$1" = "1" ] && mode="full"
-  { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE\n' \
-      "$ROOT" "$OUT" "$1" "$mode"
+  { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nSWEEP_BASE=%q\nSWEEP_PREFIX=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX\n' \
+      "$ROOT" "$OUT" "$1" "$mode" "${SWEEP_BASE:-}" "${SWEEP_PREFIX:-wpsite_acme_}"
     _backup_remote_script
   } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" PATH="$STUB:$PATH" bash -s
 }
@@ -78,6 +79,7 @@ in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
   [ -f "$OUT/wp-content.tar.gz" ]
   [ -f "$OUT/media_map.txt" ]
   grep -q "BACKUP_MODE=placeholder" "$OUT/meta.env"
+  grep -q "TABLE_PREFIX=hfm3_" "$OUT/meta.env"
 }
 
 @test "light: media excluded from tar, mapped instead" {
@@ -112,4 +114,31 @@ in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
   run_backup ""
   [ "$(in_tar 'wp-content/cache/')" = "0" ]
   [ "$(in_tar 'advanced-cache.php')" = "0" ]
+}
+
+@test "staging dir is created with 0700 perms" {
+  run_backup ""
+  [ -d "$OUT" ]
+  [ "$(stat -f '%Lp' "$OUT" 2>/dev/null || stat -c '%a' "$OUT")" = "700" ]
+}
+
+@test "no sweep when SWEEP_BASE unset (default /tmp behaviour)" {
+  local base="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$base/wpsite_acme_19990101_000000"   # an old sibling
+  touch -t 199901010000 "$base/wpsite_acme_19990101_000000"
+  OUT="$base/wpsite_acme_run" run_backup ""
+  [ -d "$base/wpsite_acme_19990101_000000" ]      # untouched: no sweep
+}
+
+@test "sweep reaps stale siblings when SWEEP_BASE set, spares fresh ones" {
+  local base="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$base/wpsite_acme_19990101_000000" \
+           "$base/wpsite_acme_fresh" \
+           "$base/keepme_19990101_000000"
+  touch -t 199901010000 "$base/wpsite_acme_19990101_000000"
+  touch -t 199901010000 "$base/keepme_19990101_000000"   # old but wrong prefix
+  SWEEP_BASE="$base" SWEEP_PREFIX="wpsite_acme_" OUT="$base/wpsite_acme_run" run_backup ""
+  [ ! -d "$base/wpsite_acme_19990101_000000" ]   # reaped: stale + our prefix
+  [ -d "$base/wpsite_acme_fresh" ]               # spared: too new
+  [ -d "$base/keepme_19990101_000000" ]          # spared: not our prefix
 }

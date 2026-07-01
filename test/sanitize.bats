@@ -16,6 +16,29 @@ setup() {
   [[ "$output" == *"WP_ENVIRONMENT_TYPE', 'local'"* ]]
 }
 
+@test "compose: sets WORDPRESS_TABLE_PREFIX when a custom prefix is given" {
+  run _render_compose db app img acme acme.test "" hfm3_
+  [[ "$output" == *'WORDPRESS_TABLE_PREFIX: "hfm3_"'* ]]
+}
+
+@test "compose: omits WORDPRESS_TABLE_PREFIX when no prefix given (image default)" {
+  run _render_compose db app img acme acme.test
+  [[ "$output" != *"WORDPRESS_TABLE_PREFIX"* ]]
+}
+
+@test "_detect_table_prefix: reads the global <prefix>users table from a dump" {
+  local f="$BATS_TEST_TMPDIR/db.sql"
+  printf 'CREATE TABLE `hfm3_usermeta` (...);\nCREATE TABLE `hfm3_users` (...);\n' > "$f"
+  run _detect_table_prefix "$f"
+  [ "$output" = "hfm3_" ]
+}
+
+@test "_detect_table_prefix: empty for a missing file (set -e safe)" {
+  run _detect_table_prefix "$BATS_TEST_TMPDIR/nope.sql"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "_sanitize_plugins: multisite also deactivates network-activated plugins (--network)" {
   CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
   # Stub wp: report wp-rocket per-site active, w3-total-cache network active, multisite=1.

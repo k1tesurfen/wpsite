@@ -76,16 +76,183 @@ config_has_client() { yq -e ".clients.\"$1\"" "$WPSITE_CONFIG" >/dev/null 2>&1; 
 # client_get <client> <key> — reads .clients.<client>.<key>
 client_get() { _yq ".clients.\"$1\".\"$2\""; }
 
+# client_set <client> <key> <value> — in-place config write (yq -i, NOT eval/source;
+# preserves comments). yq appends a brand-new client at the end of .clients. Strings
+# only — fine for ssh/wp_root/local_host/... fields (list fields stay hand-edited).
+client_set() { # client key value
+  yq -i ".clients.\"$1\".\"$2\" = \"$3\"" "$WPSITE_CONFIG"
+}
+
+# Remove a client's whole config entry (used by `client remove` / to roll back a failed add).
+config_remove_client() { yq -i "del(.clients.\"$1\")" "$WPSITE_CONFIG"; }
+
+# client_unset <client> <key> — delete one key under a client (used by `client edit --unset`).
+client_unset() { yq -i "del(.clients.\"$1\".\"$2\")" "$WPSITE_CONFIG"; }
+
 require_client() { # client_name
   local c="$1"
   [ -n "$c" ] || die "No client specified."
   config_has_client "$c" || die "Client '$c' not found in $WPSITE_CONFIG"
 }
 
-# Per-client derived paths
-client_base()       { printf '%s/%s' "$(config_base_dir)" "$1"; }
+# ---------------------------------------------------------------------------
+# Dev sites (local-only sandboxes; no SSH source). Live under .dev in the config,
+# created by `wpsite new` / `wpsite clone`. A name is EITHER a client or a dev site
+# — never both (the creators refuse a name that already exists as either kind).
+# ---------------------------------------------------------------------------
+
+# null-guarded: `keys` on a missing .dev would error, so default to {}.
+config_dev_sites() { yq -r '(.dev // {}) | keys | .[]' "$WPSITE_CONFIG"; }
+
+config_has_dev() { yq -e ".dev.\"$1\"" "$WPSITE_CONFIG" >/dev/null 2>&1; }
+
+# dev_get <name> <key> — reads .dev.<name>.<key>
+dev_get() { _yq ".dev.\"$1\".\"$2\""; }
+
+# dev_set <name> <key> <value> — in-place config write (yq -i, NOT eval/source;
+# preserves comments). Strings only — fine for host/version/source fields.
+dev_set() { # name key value
+  yq -i ".dev.\"$1\".\"$2\" = \"$3\"" "$WPSITE_CONFIG"
+}
+
+# Remove a dev site's whole config entry (used by `destroy`).
+config_remove_dev() { yq -i "del(.dev.\"$1\")" "$WPSITE_CONFIG"; }
+
+# Classify a name: "client", "dev", or "" (unknown). Clients win on collision,
+# though the creators prevent collisions in the first place.
+target_kind() { # name
+  if config_has_client "$1"; then printf 'client'
+  elif config_has_dev "$1"; then printf 'dev'
+  fi
+  return 0
+}
+
+require_target() { # name
+  local n="$1"
+  [ -n "$n" ] || die "No site specified."
+  [ -n "$(target_kind "$n")" ] || die "No client or dev site named '$n' in $WPSITE_CONFIG"
+}
+
+# Every managed site (clients + dev), one per line. Used by status / stop --all.
+config_all_targets() { config_clients; config_dev_sites; }
+
+# A DNS-label-safe site name: lowercase letters, digits, hyphens; not empty; no
+# leading/trailing hyphen. Used for container names, the compose project, the
+# .test host and the proxy route filename, so it must be strict.
+_valid_site_name() { # name
+  local n="$1"
+  [[ "$n" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]
+}
+
+# Per-client derived paths (SSH-backed clients live under base_dir/clients/).
+client_base()       { printf '%s/clients/%s' "$(config_base_dir)" "$1"; }
 client_backup_dir() { printf '%s/backups' "$(client_base "$1")"; }
 client_docker_dir() { printf '%s/docker' "$(client_base "$1")"; }
+
+# ---------------------------------------------------------------------------
+# Cloud backup sync (mounted Google Drive folder = single source of truth)
+# ---------------------------------------------------------------------------
+
+# Global cloud root (the mounted Drive folder). Empty when the feature isn't
+# configured — every cloud operation then no-ops with a quiet skip.
+config_cloud_base() {
+  local d; d="$(_yq '.cloud_base')"
+  [ -n "$d" ] && expand_tilde "$d"
+  return 0
+}
+
+# Rolling-retention count. Default 4; global .keep_backups overrides the default.
+config_keep_backups() {
+  local n; n="$(_yq '.keep_backups')"
+  case "$n" in ''|*[!0-9]*) printf '4' ;; *) printf '%s' "$n" ;; esac
+}
+
+# Retention for one client: clients.<c>.keep_backups → global → 4.
+client_keep_backups() { # client
+  local n; n="$(client_get "$1" keep_backups)"
+  case "$n" in ''|*[!0-9]*) config_keep_backups ;; *) printf '%s' "$n" ;; esac
+}
+
+# Production domain (host only, no proto/path/port/www) from the newest backup's
+# meta.env SOURCE_HOME — the default cloud subfolder name. Empty if none yet.
+_cloud_domain_from_meta() { # client
+  local backup_dir latest meta source_home host
+  backup_dir="$(client_backup_dir "$1")"
+  [ -d "$backup_dir" ] || return 0
+  # shellcheck disable=SC2012  # timestamp dirs; mtime sort via ls is fine
+  latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"; latest="${latest%/}"
+  [ -n "$latest" ] || return 0
+  meta="$latest/meta.env"
+  [ -f "$meta" ] || return 0
+  source_home="$(grep -m1 '^SOURCE_HOME=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
+  [ -n "$source_home" ] || return 0
+  host="${source_home#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host#www.}"
+  printf '%s' "$host"
+}
+
+# Cloud backup dir for a client. Override (clients.<c>.cloud_dir) is an absolute
+# path used verbatim; otherwise <cloud_base>/<production-domain>. Empty when
+# cloud_base is unset (feature off) or no domain can be derived yet.
+client_cloud_dir() { # client
+  local override; override="$(client_get "$1" cloud_dir)"
+  if [ -n "$override" ]; then expand_tilde "$override"; return 0; fi
+  local base domain
+  base="$(config_cloud_base)"
+  [ -n "$base" ] || return 0
+  domain="$(_cloud_domain_from_meta "$1")"
+  [ -n "$domain" ] || return 0
+  printf '%s/%s' "${base%/}" "$domain"
+}
+
+# True when a client's cloud dir resolves AND its parent (the Drive mount) exists
+# — i.e. we can safely read/write it. Guards every cloud op so an unmounted Drive
+# degrades to a warning, never a failure.
+cloud_available() { # client
+  local dir; dir="$(client_cloud_dir "$1")"
+  [ -n "$dir" ] || return 1
+  [ -d "$(dirname "$dir")" ]
+}
+
+# A backup dir is "complete" (eligible to sync/build) only with all core artifacts.
+_is_complete_backup() { # dir
+  local d="$1"
+  [ -s "$d/db.sql" ] && [ -s "$d/wp-content.tar.gz" ] && [ -s "$d/meta.env" ]
+}
+
+# Backup folder identity: YYYYMMDD_HHMMSS, optionally a -permanent suffix.
+_is_backup_id()         { [[ "$1" =~ ^[0-9]{8}_[0-9]{6}(-permanent)?$ ]]; }
+_is_persistent_backup() { case "$(basename "$1")" in *-permanent) return 0 ;; *) return 1 ;; esac; }
+
+# Map a backup id to its dir, tolerating the -permanent suffix (option A): a bare
+# id resolves to <id>-permanent when only the persistent variant exists. Returns
+# the canonical path even when missing, so callers can produce their own error.
+resolve_backup_dir() { # client id
+  local bd id
+  bd="$(client_backup_dir "$1")"; id="$2"
+  if   [ -d "$bd/$id" ];           then printf '%s/%s' "$bd" "$id"
+  elif [ -d "$bd/$id-permanent" ]; then printf '%s/%s-permanent' "$bd" "$id"
+  else printf '%s/%s' "$bd" "$id"; fi
+}
+
+# Per-dev-site derived paths (local sandboxes live under base_dir/dev/; no backups).
+dev_base()       { printf '%s/dev/%s' "$(config_base_dir)" "$1"; }
+dev_docker_dir() { printf '%s/docker' "$(dev_base "$1")"; }
+
+# Docker dir for either kind — lifecycle/destroy/status resolve a name to its dir.
+target_docker_dir() { # name
+  case "$(target_kind "$1")" in
+    dev) dev_docker_dir "$1" ;;
+    *)   client_docker_dir "$1" ;;
+  esac
+}
+
+# Ensure the clients/ and dev/ subfolders exist under base_dir. Called when a site
+# is created/added; mkdir -p on the full per-site chain also creates them, but this
+# guarantees both top-level buckets exist explicitly.
+_ensure_base_layout() {
+  mkdir -p "$(config_base_dir)/clients" "$(config_base_dir)/dev"
+  return 0
+}
 
 # Extract the base domain from a URL/hostname and return it with .test suffix.
 _local_host_from_url() {
@@ -138,6 +305,18 @@ client_local_host() {
 
   # Fallback to the client identifier
   printf '%s.test' "$client"
+}
+
+# Local hostname for either kind of site. Dev sites store their host explicitly
+# (default <name>.test); clients derive it from the backup (client_local_host).
+target_local_host() { # name
+  if config_has_dev "$1"; then
+    local h; h="$(dev_get "$1" host)"
+    [ -n "$h" ] && { printf '%s' "$h"; return; }
+    printf '%s.test' "$1"
+  else
+    client_local_host "$1"
+  fi
 }
 
 # ---------------------------------------------------------------------------

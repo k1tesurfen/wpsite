@@ -3,16 +3,39 @@
 #   mkdir -p ~/.config/wpsite
 #   cp wpsite.yml.example ~/.config/wpsite/wpsite.yml
 
-# Master root for all client data (backups + docker live under <base_dir>/<client>/).
-# A leading ~/ is expanded to your home directory.
+# Master root for all site data. A leading ~/ is expanded to your home directory.
+# SSH-backed clients live under <base_dir>/clients/<name>/ (backups + docker);
+# local-only dev sites live under <base_dir>/dev/<name>/. Both subfolders are
+# created automatically when a site is added.
 base_dir: ~/websites
 
+# Optional: cloud backup sync (a mounted Google Drive for Desktop folder = the
+# single source of truth; local is a fast cache). Leave unset to disable entirely.
+# A client's backups go to <cloud_base>/<production-domain>/ by default (domain is
+# read from the newest backup's metadata); override per client with cloud_dir.
+# cloud_base: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/clients
+
+# Rolling retention: after each backup, keep only the newest N non-permanent
+# backups (per client; -permanent backups are never auto-pruned). Default 4.
+# keep_backups: 4
+
+# SSH-backed production clients. Hand-edit these, or let `wpsite client add` onboard
+# one for you (prompts for the fields below, runs ssh-copy-id, then `wpsite test`).
 clients:
   acme:
     ssh: ubuntu@acme-industrial.com   # ssh target (user@host) for the production server
     wp_root: /var/www/acme.com        # absolute path to the WordPress install on that server
     # Optional per-client overrides:
+    # remote_tmp: ~/.wpsite_tmp       # remote backup staging dir (default: /tmp).
+    #                                 # Set this (abs or ~/-relative, ABOVE the docroot)
+    #                                 # when the host's /tmp is small/quota-capped — e.g.
+    #                                 # entry-level shared hosting like Strato.
     # local_host: acme.test           # local hostname (default: <client>.test)
+    # cloud_dir: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/clients/anthropic.com
+    #                                 # FULL path override for this client's cloud backups
+    #                                 # (use when the Drive folder is the FUTURE/final
+    #                                 # domain, not the one in the current backup).
+    # keep_backups: 6                 # per-client rolling-retention override (default: global/4)
     # deactivate_plugins:             # extra plugin slugs to disable on the replica
     #   - some-prod-only-plugin       # (caching/optimization plugins are disabled by default)
     # review_pages:                   # extra pages to screenshot in `upgrade --review`
@@ -27,3 +50,16 @@ clients:
   cafe:
     ssh: cafe_admin@192.168.1.45
     wp_root: /home/cafe/public_html
+
+# Local-only dev sites. You normally don't hand-edit this — `wpsite new` and
+# `wpsite clone` add/remove entries here (and `wpsite destroy` removes a dev site).
+# Shown for reference:
+# dev:
+#   myshop:
+#     host: myshop.test       # local hostname (default: <name>.test)
+#     wp_version: "6.7"        # blank/omitted = latest
+#     php: "8.2"
+#   acme-staging:              # a clone of the `acme` client
+#     host: acme-staging.test
+#     source: acme             # the client it was cloned from
+#     backup: "20260626_101500"

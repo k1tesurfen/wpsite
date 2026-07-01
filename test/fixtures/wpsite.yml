@@ -1,4 +1,6 @@
 base_dir: ~/wpsite-test-root
+cloud_base: ~/wpsite-cloud
+keep_backups: 3
 clients:
   acme:
     ssh: ubuntu@acme.example
@@ -7,5 +9,8 @@ clients:
     ssh: root@baker.example
     wp_root: /var/www/html
     local_host: baker-custom.test
+    remote_tmp: ~/.wpsite_tmp
+    cloud_dir: /Volumes/Drive/clients/baker-final.com
+    keep_backups: 6
     deactivate_plugins:
       - some-prod-plugin

@@ -9,14 +9,36 @@
 # Swap the TLD of a domain to .test.
 _swap_tld() { printf '%s.test' "${1%.*}"; }
 
+# Map a production network domain to its local .test host.
+#   ns empty (build) → legacy: swap only the TLD (shop.example.com → shop.example.test).
+#   ns set   (clone) → namespace every host under <ns>.test so the clone can't collide
+#                      with the client's own build (or another clone) on shared hosts:
+#       main domain            → <ns>.test            (matches the dev site's config host)
+#       <label>.<main>         → <label>.<ns>.test    (subdomain subsites)
+#       unrelated mapped domain→ <dom-dots-as-hyphens>.<ns>.test  (collision-free fallback)
+_ms_local_host() { # prod_domain main_prod_domain ns
+  local d="$1" main="$2" ns="$3"
+  if [ -z "$ns" ]; then _swap_tld "$d"; return; fi
+  if [ "$d" = "$main" ]; then
+    printf '%s.test' "$ns"
+  elif [ "$d" != "${d%".$main"}" ]; then          # d ends with ".$main" → subdomain subsite
+    printf '%s.%s.test' "${d%".$main"}" "$ns"
+  else                                            # mapped domain on an unrelated host
+    printf '%s.%s.test' "$(printf '%s' "$d" | tr '.' '-')" "$ns"
+  fi
+}
+
 # Main (blog 1) production domain from sites.csv (first data row).
 _ms_main_domain() { tail -n +2 "$1" 2>/dev/null | head -1 | cut -d, -f2; }
 
-# "prod_domain local_domain" for every site in sites.csv (one per line).
-_ms_pairs() { # sites.csv
-  local d
-  tail -n +2 "$1" 2>/dev/null | cut -d, -f2 | while IFS= read -r d; do
-    [ -n "$d" ] && printf '%s %s\n' "$d" "$(_swap_tld "$d")"
+# "prod_domain local_domain" for every site in sites.csv (one per line). With a
+# devname (clone) the local hosts are namespaced under <devname>.test; without one
+# (build) the TLD is simply swapped to .test.
+_ms_pairs() { # sites.csv [devname]
+  local csv="$1" ns="${2:-}" main d
+  main="$(_ms_main_domain "$csv")"
+  tail -n +2 "$csv" 2>/dev/null | cut -d, -f2 | while IFS= read -r d; do
+    [ -n "$d" ] && printf '%s %s\n' "$d" "$(_ms_local_host "$d" "$main" "$ns")"
   done
 }
 
@@ -35,24 +57,26 @@ EOF
 }
 
 # Fix the network's domains with RAW SQL (no WP bootstrap needed) so wp-cli can then
-# load the network — breaks the bootstrap chicken-and-egg. wp_site forced to the main
-# local domain; each wp_blogs row to its swapped domain. Assumes the wp_ table prefix.
-_ms_fix_domains() { # db_container main_local sites.csv
-  local db="$1" main_local="$2" csv="$3"
-  local sql="UPDATE wp_site SET domain='$main_local';" blog_id domain rest local_d
+# load the network — breaks the bootstrap chicken-and-egg. <prefix>site forced to the
+# main local domain; each <prefix>blogs row to its swapped domain. The prefix must
+# match the imported DB (hosts often customize it, e.g. hfm3_) — defaults to wp_.
+_ms_fix_domains() { # db_container main_local sites.csv [ns] [table_prefix]
+  local db="$1" main_local="$2" csv="$3" ns="${4:-}" prefix="${5:-wp_}"
+  local main_prod; main_prod="$(_ms_main_domain "$csv")"
+  local sql="UPDATE ${prefix}site SET domain='$main_local';" blog_id domain rest local_d
   while IFS=, read -r blog_id domain rest; do
     case "$blog_id" in ''|blog_id) continue ;; esac
     [ -n "$domain" ] || continue
-    local_d="$(_swap_tld "$domain")"
-    sql="$sql UPDATE wp_blogs SET domain='$local_d' WHERE blog_id=$blog_id;"
+    local_d="$(_ms_local_host "$domain" "$main_prod" "$ns")"
+    sql="$sql UPDATE ${prefix}blogs SET domain='$local_d' WHERE blog_id=$blog_id;"
   done < "$csv"
   docker exec -i "$db" mariadb -h127.0.0.1 -uwordpress -pwordpress wordpress -e "$sql"
 }
 
 # Per-domain content rewrite across the network — each prod domain → its local .test.
 # Covers http/https × plain/escaped × protocol-relative (same matrix as single-site).
-_ms_rewrite_content() { # app_container sites.csv
-  local app="$1" csv="$2"
+_ms_rewrite_content() { # app_container sites.csv [ns]
+  local app="$1" csv="$2" ns="${3:-}"
   local wp=(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes)
   local f=(--all-tables --skip-columns=guid)
   local prod local_d
@@ -63,17 +87,17 @@ _ms_rewrite_content() { # app_container sites.csv
     "${wp[@]}" search-replace "https:\\/\\/$prod"  "http:\\/\\/$local_d"  "${f[@]}" || true
     "${wp[@]}" search-replace "http:\\/\\/$prod"   "http:\\/\\/$local_d"  "${f[@]}" || true
     "${wp[@]}" search-replace "//$prod"            "//$local_d"           "${f[@]}" || true
-  done < <(_ms_pairs "$csv")
+  done < <(_ms_pairs "$csv" "$ns")
 }
 
 # Proxy route listing every local domain: Host(`a`) || Host(`b`) || …
-_ms_write_route() { # client sites.csv
-  local client="$1" csv="$2" dyn rule="" prod local_d
+_ms_write_route() { # client sites.csv [ns]
+  local client="$1" csv="$2" ns="${3:-}" dyn rule="" prod local_d
   dyn="$(_proxy_dynamic_dir)"; mkdir -p "$dyn"
   while read -r prod local_d; do
     [ -n "$local_d" ] || continue
     rule="${rule:+$rule || }Host(\`$local_d\`)"
-  done < <(_ms_pairs "$csv")
+  done < <(_ms_pairs "$csv" "$ns")
   cat > "$dyn/$client.yml" <<EOF
 http:
   routers:
@@ -102,9 +126,10 @@ _ms_join_all_sites() { # app_container known_user sites.csv
 }
 
 # Ensure every local domain resolves (dnsmasq *.test covers all; else /etc/hosts each).
-_ms_ensure_dns() { # sites.csv
+_ms_ensure_dns() { # sites.csv [ns]
   local prod local_d
   while read -r prod local_d; do
     [ -n "$local_d" ] && _ensure_local_dns "$local_d"
-  done < <(_ms_pairs "$1")
+  done < <(_ms_pairs "$1" "${2:-}")
+  return 0
 }

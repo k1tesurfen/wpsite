@@ -20,13 +20,22 @@ clients:
 EOF
   export WPSITE_CONFIG="$CFG"
   source "$REPO/lib/common.sh"
+  source "$REPO/lib/cloud.sh"
   source "$REPO/lib/cmd_prune.sh"
+}
+
+# A complete backup (all core artifacts) at a real timestamp id; $3 = age in days.
+mkfull() { # client id age_days
+  local d; d="$(client_backup_dir "$1")/$2"
+  mkdir -p "$d"; echo x > "$d/db.sql"; echo x > "$d/wp-content.tar.gz"; echo x > "$d/meta.env"
+  touch -t "$(date -v -"$3"d +%Y%m%d0000)" "$d" 2>/dev/null \
+    || touch -d "-$3 days" "$d" 2>/dev/null || true
 }
 
 # Create N backups for a client with increasing mtimes (oldest first); the dir
 # name encodes order. $1=client, then a list of "name age_days" pairs.
 mkbackup() { # client name age_days
-  local d="$BASE/$1/backups/$2"
+  local d; d="$(client_backup_dir "$1")/$2"
   mkdir -p "$d"; echo x > "$d/db.sql"
   # set mtime to now - age_days
   touch -t "$(date -v -"$3"d +%Y%m%d0000)" "$d" 2>/dev/null \
@@ -55,9 +64,9 @@ mkbackup() { # client name age_days
   for i in 1 2 3 4 5; do mkbackup acme "2026010$i" "$(( 10 - i ))"; done
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme --keep 2 --yes
   [ "$status" -eq 0 ]
-  [ "$(find "$BASE/acme/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "2" ]
-  [ -d "$BASE/acme/backups/20260105" ]   # newest kept
-  [ ! -d "$BASE/acme/backups/20260101" ] # oldest gone
+  [ "$(find "$BASE/clients/acme/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "2" ]
+  [ -d "$BASE/clients/acme/backups/20260105" ]   # newest kept
+  [ ! -d "$BASE/clients/acme/backups/20260101" ] # oldest gone
 }
 
 @test "--older-than deletes only old backups" {
@@ -65,27 +74,28 @@ mkbackup() { # client name age_days
   mkbackup acme stale 100
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme --older-than 30d --yes
   [ "$status" -eq 0 ]
-  [ -d "$BASE/acme/backups/fresh" ]
-  [ ! -d "$BASE/acme/backups/stale" ]
+  [ -d "$BASE/clients/acme/backups/fresh" ]
+  [ ! -d "$BASE/clients/acme/backups/stale" ]
 }
 
 @test "--keep protects newest even if old; --older-than only trims the rest" {
-  mkbackup acme oldest 100
-  mkbackup acme middle 80
-  mkbackup acme newest 60
+  # Real backup ids: newest-by-name == newest chronologically (prune ranks by id).
+  mkbackup acme 20260101_120000 100
+  mkbackup acme 20260201_120000 80
+  mkbackup acme 20260301_120000 60
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme --keep 1 --older-than 30d --yes
   [ "$status" -eq 0 ]
-  [ -d "$BASE/acme/backups/newest" ]      # protected by --keep 1
-  [ ! -d "$BASE/acme/backups/oldest" ]
-  [ ! -d "$BASE/acme/backups/middle" ]
+  [ -d "$BASE/clients/acme/backups/20260301_120000" ]      # protected by --keep 1
+  [ ! -d "$BASE/clients/acme/backups/20260101_120000" ]
+  [ ! -d "$BASE/clients/acme/backups/20260201_120000" ]
 }
 
 @test "--all prunes every configured client" {
   for i in 1 2 3; do mkbackup acme "ac$i" "$(( 9 - i ))"; mkbackup baker "bk$i" "$(( 9 - i ))"; done
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune --all --keep 1 --yes
   [ "$status" -eq 0 ]
-  [ "$(find "$BASE/acme/backups"  -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "1" ]
-  [ "$(find "$BASE/baker/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "1" ]
+  [ "$(find "$BASE/clients/acme/backups"  -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "1" ]
+  [ "$(find "$BASE/clients/baker/backups" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = "1" ]
 }
 
 @test "nothing to prune is a clean no-op" {
@@ -93,11 +103,49 @@ mkbackup() { # client name age_days
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme --keep 5 --yes
   [ "$status" -eq 0 ]
   [[ "$output" == *"Nothing to prune"* ]]
-  [ -d "$BASE/acme/backups/only" ]
+  [ -d "$BASE/clients/acme/backups/only" ]
 }
 
 @test "requires a client or --all" {
   run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune --keep 2
   [ "$status" -ne 0 ]
   [[ "$output" == *"Specify a <client>"* ]]
+}
+
+@test "rolling retention skips -permanent backups (they don't count toward keep)" {
+  mkfull acme 20260101_120000 9
+  mkfull acme 20260102_120000 8
+  mkfull acme 20260103_120000-permanent 7
+  mkfull acme 20260104_120000 6
+  mkfull acme 20260105_120000 5
+  run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme --keep 1 --yes
+  [ "$status" -eq 0 ]
+  [ -d "$BASE/clients/acme/backups/20260105_120000" ]            # newest non-perm kept
+  [ -d "$BASE/clients/acme/backups/20260103_120000-permanent" ]  # permanent untouched
+  [ ! -d "$BASE/clients/acme/backups/20260101_120000" ]          # older non-perm pruned
+}
+
+@test "_prune_candidates never lists a -permanent dir" {
+  mkfull acme 20260101_120000 9
+  mkfull acme 20260102_120000-permanent 8
+  run _prune_candidates acme 0 ""
+  [[ "$output" != *permanent* ]]
+  [[ "$output" == *20260101_120000* ]]
+}
+
+@test "single-backup form deletes one backup, even if permanent" {
+  mkfull acme 20260101_120000 9
+  mkfull acme 20260202_120000-permanent 8
+  # tolerant: pass the bare id, the -permanent dir is found + deleted
+  run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme 20260202_120000 --yes
+  [ "$status" -eq 0 ]
+  [ ! -d "$BASE/clients/acme/backups/20260202_120000-permanent" ]
+  [ -d "$BASE/clients/acme/backups/20260101_120000" ]            # the other one survives
+}
+
+@test "single-backup form: unknown id errors" {
+  mkfull acme 20260101_120000 9
+  run env WPSITE_CONFIG="$CFG" "$REPO/bin/wpsite" prune acme 29990101_000000 --yes
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No backup"* ]]
 }
