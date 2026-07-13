@@ -100,3 +100,34 @@ setup() {
   WPSITE_ADMIN_USER=dev WPSITE_ADMIN_PASS=s3cret run _set_known_admin app http://acme.test
   [[ "$output" == *"dev / s3cret"* ]]
 }
+
+# --- Wordfence: silence notifications, keep it active ----------------------
+
+@test "_silence_wordfence: installed -> blanks alerts + drops Central (honours prefix)" {
+  OUT="$BATS_TEST_TMPDIR/sql"; : > "$OUT"
+  docker() {
+    case "$*" in
+      *"SHOW TABLES"*) echo "hfm3_wfconfig"; return 0 ;;   # Wordfence present
+      *) cat > "$OUT"; return 0 ;;                          # capture the SQL heredoc
+    esac
+  }
+  run _silence_wordfence db hfm3_
+  [ "$status" -eq 0 ]
+  grep -q 'hfm3_wfconfig' "$OUT"          # never assumes wp_
+  grep -q "name='alertEmails'" "$OUT"     # blank the recipients
+  grep -q "alertOn" "$OUT"                # switch alerts off
+  grep -q "wordfenceCentral%" "$OUT"      # drop the Central link (HTTPS bypass)
+}
+
+@test "_silence_wordfence: not installed -> no-op, no SQL executed" {
+  RAN="$BATS_TEST_TMPDIR/ran"; : > "$RAN"
+  docker() {
+    case "$*" in
+      *"SHOW TABLES"*) return 0 ;;                       # prints nothing -> absent
+      *) echo ran >> "$RAN"; cat >/dev/null; return 0 ;;
+    esac
+  }
+  run _silence_wordfence db wp_
+  [ "$status" -eq 0 ]
+  [ ! -s "$RAN" ]                          # the UPDATE/DELETE exec never ran
+}

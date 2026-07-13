@@ -72,6 +72,9 @@ Commands:
   proxy   <action>    Shared reverse proxy + wildcard DNS for running all replicas
                       at once: up | down | status | install-dns
   mail    <action>    Shared Mailpit that traps all replica email: up | down | status
+  db      <site>      Open a shared Adminer DB browser, logged into <site>'s database
+                      (any built client or dev site); no <site> reopens the last one.
+                      Manage the container with up | down | status
   list    [site]      List clients + backups + dev sites (or one site's detail)
   status              Show running replicas + dev sites and their URLs
   doctor              Verify dependencies and environment
@@ -116,6 +119,7 @@ main() {
     prune)   cmd_prune "$@" ;;
     proxy)   cmd_proxy "$@" ;;
     mail)    cmd_mail "$@" ;;
+    db)      cmd_db "$@" ;;
     list)    cmd_list "$@" ;;
     status)  cmd_status "$@" ;;
     doctor)  cmd_doctor "$@" ;;

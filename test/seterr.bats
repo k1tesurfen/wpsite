@@ -66,6 +66,16 @@ echo __REACHED__"; }
   [[ "$output" == *__REACHED__* ]]
 }
 
+@test "_write_php_ini: writes the ini file, returns 0" {
+  strict '
+    d="$(mktemp -d)"; cd "$d"
+    _write_php_ini php-wpsite.ini
+    grep -q "upload_max_filesize" php-wpsite.ini || exit 97
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
 @test "_deactivate_matching: no matching plugins -> does not abort" {
   run env REPO="$REPO" bash -c 'set -euo pipefail
     source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_build.sh"
@@ -136,4 +146,37 @@ cstrict() {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   cstrict '_backup_post_cloud acme 20260101_120000'
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+# --- db / Adminer helpers --------------------------------------------------
+
+@test "_silence_wordfence: wordfence absent -> no-op, does not abort" {
+  run env REPO="$REPO" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_build.sh"
+    docker() { :; }; export -f docker
+    _silence_wordfence db wp_
+    echo __REACHED__'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_install_sendmail_shim: bare statement safe (stubbed docker)" {
+  run env REPO="$REPO" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_mail.sh"; source "$REPO/lib/cmd_build.sh"
+    docker() { cat >/dev/null 2>&1 || true; return 0; }; export -f docker
+    _install_sendmail_shim app
+    echo __REACHED__'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_adminer_attach: bare statement safe (empty networks, stubbed docker)" {
+  # Ends in a for-loop over a possibly-empty network list — must not abort.
+  run env REPO="$REPO" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_db.sh"
+    docker() { :; }; export -f docker
+    _adminer_attach wp_acme_db
+    echo __REACHED__'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
 }

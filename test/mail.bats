@@ -54,3 +54,29 @@ setup() {
   [[ "$def" == *"fluent-smtp"* ]]
   [[ "$def" == *"post-smtp"* ]]
 }
+
+# --- second mail-trap layer: native PHP mail() -----------------------------
+
+@test "_write_php_ini: routes native mail() through the Mailpit sendmail shim" {
+  source "$REPO/lib/cmd_build.sh"
+  d="$BATS_TEST_TMPDIR/php.ini"
+  _write_php_ini "$d"
+  grep -q 'sendmail_path' "$d"
+  grep -q '/usr/local/bin/wpsite-sendmail' "$d"
+}
+
+@test "_install_sendmail_shim: writes an executable PHP shim that targets Mailpit" {
+  # docker stub captures what would be written into the container.
+  run env REPO="$REPO" OUT="$BATS_TEST_TMPDIR/shim" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_proxy.sh"; source "$REPO/lib/cmd_mail.sh"
+    source "$REPO/lib/cmd_build.sh"
+    docker() { cat > "$OUT"; }; export -f docker   # capture the shim heredoc
+    _install_sendmail_shim app
+    echo __REACHED__'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+  grep -q '/usr/local/bin/php' "$BATS_TEST_TMPDIR/shim"   # shebang
+  grep -q 'fsockopen' "$BATS_TEST_TMPDIR/shim"
+  grep -q "wpsite-mail" "$BATS_TEST_TMPDIR/shim"          # the Mailpit SMTP alias
+  grep -q '1025' "$BATS_TEST_TMPDIR/shim"
+}

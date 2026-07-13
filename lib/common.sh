@@ -351,6 +351,12 @@ wpsite_ssh() {
 # the directory name and tears down nothing. Works with or without the dir/file.
 _compose_down() { # project docker_dir
   local project="$1" dir="$2"
+  # The shared Adminer container attaches to a site's project network on demand
+  # (wpsite db); detach it first so `compose down` can actually remove that
+  # network instead of leaving it dangling. Best-effort, harmless when absent.
+  if [ -n "${WPSITE_ADMINER_CONTAINER:-}" ]; then
+    docker network disconnect -f "${project}_default" "$WPSITE_ADMINER_CONTAINER" >/dev/null 2>&1 || true
+  fi
   if [ -f "$dir/docker-compose.yml" ]; then
     ( cd "$dir" && docker compose -p "$project" down -v --remove-orphans >/dev/null 2>&1 || true )
   else

@@ -27,6 +27,12 @@ wpsite doctor                     # verify everything is ready
 ## Usage
 
 ```bash
+# Manage clients (SSH-backed production sites) in the config
+wpsite client add         # onboard a new client (wizard: prompts, ssh-copy-id, then a readiness test)
+wpsite client edit <c>    # change a client's fields (interactive, or --ssh/--wp-root/--cloud-dir/…)
+wpsite client remove <c>  # remove a client + its replica (--purge also deletes its local backups)
+
+# Backup & build replicas
 wpsite backup  <client>   # snapshot a remote site → local backup artifacts (media → placeholders)
 wpsite backup --all       # …back up every configured client, one after another
 wpsite backup --full <c>  # …download REAL media instead (larger, exact replica)
@@ -34,24 +40,38 @@ wpsite build   <client>   # (re)build & run a backup at http://<client>.test (ne
 wpsite build <c> --backup <id>   # …use a specific backup (id from `wpsite list <c>`)
 wpsite start   <client>   # start a stopped replica (keeps data)
 wpsite stop    <client>   # stop a running replica (keeps data, restartable)
+wpsite test    <client>   # preflight: SSH reachability + remote deps + wp-cli/DB readiness
+wpsite destroy <client>   # remove a replica (containers + DB volume + files)
+
+# Local dev sites (no production source)
+wpsite new     [name]     # create a blank local dev site (no name → wizard)
+wpsite clone   <c> <dev>  # create a dev site from a client (real media; --light = placeholders)
+wpsite inject  <dev>      # live-mount a local plugin into a dev site (default ~/git/aule)
+wpsite inject <dev> --activate [--network]   # …and activate it (--network = multisite-wide)
+
+# Upgrade workflow
 wpsite upgrade <client>   # update core/plugins/themes on the replica + before→after report
 wpsite upgrade <c> --review   # …also screenshot pages before/after & open a comparison
 wpsite review  <client>   # re-open the latest upgrade comparison page
 wpsite apply   <client>   # run the rehearsed upgrade ON PRODUCTION (fresh backup + typed confirm)
-wpsite destroy <client>   # remove a replica (containers + DB volume + files)
-wpsite prune   <client>   # delete old backups (default: keep newest 5)
+
+# Backups retention & shared infra
+wpsite prune   <client>   # delete old backups (default: keep newest 4)
 wpsite prune --all --keep 3            # apply to every client
 wpsite prune <c> --older-than 30d --dry-run   # preview by age; --yes to skip the prompt
 wpsite proxy   status     # shared reverse proxy + wildcard DNS status
 wpsite proxy   install-dns             # one-time: *.test → 127.0.0.1 (drops per-build sudo)
 wpsite mail    status     # shared Mailpit (traps all replica email); inbox at :8025
+wpsite db      <site>     # open the DB in a browser (Adminer), logged in — client or dev site
+wpsite db                 # …reopen the last site's DB (no arg)
 wpsite list    [client]   # all clients + backups, or one client's backups in detail
 wpsite status             # running replicas and their URLs
 wpsite doctor             # verify dependencies and environment
 ```
 
-Typical loop: `backup` once, then `build` to (re)create the replica from it;
-`stop`/`start` to pause and resume without rebuilding; `destroy` to remove it.
+Typical loop: `client add` to onboard, `backup` once, then `build` to (re)create the
+replica from it; `stop`/`start` to pause and resume without rebuilding; `destroy` to
+remove the replica (or `client remove` to drop the client entirely).
 
 ## Configuration
 
@@ -66,7 +86,13 @@ clients:
     # local_host: acme.test   # optional override (default <client>.test)
 ```
 
-Backups and the Docker working tree live under `<base_dir>/<client>/`.
+The easiest way to add a client is `wpsite client add` — it prompts for these
+fields, installs your SSH key (`ssh-copy-id`), writes the entry, and runs a
+readiness test. Edit or drop entries later with `wpsite client edit`/`remove`.
+You can still hand-edit the file directly.
+
+Client backups and the Docker working tree live under `<base_dir>/clients/<client>/`;
+local-only dev sites live under `<base_dir>/dev/<name>/`.
 
 ## Multi-site
 
@@ -89,6 +115,26 @@ auto-starts a shared **Mailpit** container and injects a mu-plugin that routes e
 `wp_mail()` to it — nothing is ever delivered for real. Read what the site sends at
 **http://localhost:8025**. Mail/SMTP plugins are deactivated so they can't relay
 around it. `wpsite mail status` / `down` manage the container.
+
+Three layers make the trap hard to escape: the mu-plugin (`wp_mail()`), a
+`sendmail_path` shim so any plugin using PHP's native `mail()` is caught too, and —
+for **Wordfence** — silencing its own notifications on the replica (it stays active
+for scans/WAF). That last one matters because a site linked to **Wordfence Central**
+emails alerts from Wordfence's cloud over HTTPS, which no local mail catcher can
+intercept; `build` blanks its alert recipients and disconnects Central instead. (Rebuild
+existing replicas to pick up the sendmail_path + Wordfence layers.)
+
+## Browse the database
+
+`wpsite db <site>` opens the database of any built replica (client **or** dev site)
+in your default browser, already logged in — no credentials to type. It runs a
+single shared **Adminer** container (started on first use, built once as
+`wpsite/adminer`) that reaches each site's private DB by joining that site's Docker
+network on demand, so one install serves every client. Inspect tables, run queries,
+edit rows. Run it with no argument (`wpsite db`) to reopen the last site you looked
+at — if that site isn't currently built/online it just tells you which one it was and
+stops (it never auto-starts a site). `wpsite db status` / `down` manage the container;
+the UI lives at **http://localhost:8080** (override with `WPSITE_ADMINER_PORT`).
 
 ## Dev conveniences on every replica
 

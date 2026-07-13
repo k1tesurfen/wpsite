@@ -217,6 +217,87 @@ _ensure_wp_cli() { # app_container
   ' >/dev/null 2>&1
 }
 
+# Second mail-trap layer: the mu-plugin only routes wp_mail()/WP's PHPMailer. Any
+# plugin calling PHP's native mail() (or its own PHPMailer in isMail() mode) would
+# otherwise bypass Mailpit — and the stock image's sendmail_path points at a
+# non-existent /usr/sbin/sendmail, so those mails silently vanish. This drops a
+# tiny SMTP shim (referenced by sendmail_path in php-wpsite.ini) that forwards the
+# raw message to the shared Mailpit. Pure PHP — no extra packages, mirrors how
+# _ensure_wp_cli installs into the running container. Best-effort (never fatal).
+_install_sendmail_shim() { # app_container
+  local app="$1"
+  if ! docker exec -i "$app" sh -c \
+      'cat > /usr/local/bin/wpsite-sendmail && chmod +x /usr/local/bin/wpsite-sendmail' <<PHP
+#!/usr/local/bin/php
+<?php
+// wpsite: minimal sendmail replacement — forwards native PHP mail() to Mailpit.
+// Recipients come from the headers (called as \`-t\`). Never blocks the app: any
+// error just drops the message (this is a dev trap, not a real MTA).
+\$host = getenv('WPSITE_MAIL_HOST') ?: '${WPSITE_MAIL_HOST}';
+\$port = (int) (getenv('WPSITE_MAIL_PORT') ?: 1025);
+\$raw = stream_get_contents(STDIN);
+if (!\$raw) { exit(0); }
+\$raw = str_replace("\r\n", "\n", \$raw);
+list(\$head, \$body) = array_pad(explode("\n\n", \$raw, 2), 2, '');
+\$headers = [];
+foreach (explode("\n", \$head) as \$line) {
+    if (preg_match('/^([A-Za-z\-]+):\s*(.*)\$/', \$line, \$m)) { \$headers[strtolower(\$m[1])] = \$m[2]; }
+}
+\$recips = [];
+foreach (['to', 'cc', 'bcc'] as \$h) {
+    if (empty(\$headers[\$h])) { continue; }
+    foreach (explode(',', \$headers[\$h]) as \$addr) {
+        if (preg_match('/<([^>]+)>/', \$addr, \$mm)) { \$recips[] = trim(\$mm[1]); }
+        elseif (trim(\$addr) !== '') { \$recips[] = trim(\$addr); }
+    }
+}
+if (!\$recips) { \$recips = ['catch-all@wpsite.local']; }
+\$from = 'wpsite@localhost';
+if (!empty(\$headers['from'])) {
+    \$from = preg_match('/<([^>]+)>/', \$headers['from'], \$mm) ? \$mm[1] : trim(\$headers['from']);
+}
+\$fp = @fsockopen(\$host, \$port, \$eno, \$estr, 10);
+if (!\$fp) { exit(0); }
+\$say = function (\$cmd) use (\$fp) { fwrite(\$fp, \$cmd . "\r\n"); return fgets(\$fp, 1024); };
+fgets(\$fp, 1024);                      // greeting
+\$say('HELO wpsite');
+\$say('MAIL FROM:<' . \$from . '>');
+foreach (\$recips as \$r) { \$say('RCPT TO:<' . \$r . '>'); }
+\$say('DATA');
+\$data = preg_replace('/^\./m', '..', str_replace("\n", "\r\n", \$raw)); // dot-stuff
+fwrite(\$fp, \$data . "\r\n.\r\n");
+fgets(\$fp, 1024);
+\$say('QUIT');
+fclose(\$fp);
+exit(0);
+PHP
+  then
+    log_warn "Could not install the sendmail→Mailpit shim; native mail() won't be trapped."
+  fi
+  return 0
+}
+
+# Keep Wordfence ACTIVE (scans/WAF are valuable on a replica) but stop it emailing:
+# its wp_mail() alerts are already trapped by Mailpit, but a Wordfence-Central-linked
+# site pushes alerts to noc1.wordfence.com over HTTPS — Mailpit cannot intercept that.
+# So blank the recipient list, switch every alert + the summary off, and drop the
+# Central link. wfConfig lives in <prefix>wfconfig (no wp-cli command exposes it, and
+# the app image has no mysql client), so this is raw SQL via the db container —
+# guarded to a clean no-op when Wordfence isn't installed.
+_silence_wordfence() { # db_container table_prefix
+  local db_c="$1" p="${2:-wp_}"
+  docker exec "$db_c" mariadb -uroot -proot wordpress -N \
+      -e "SHOW TABLES LIKE '${p}wfconfig'" 2>/dev/null | grep -q . || return 0
+  log_info "Silencing Wordfence notifications (plugin stays active)..."
+  docker exec -i "$db_c" mariadb -uroot -proot wordpress 2>/dev/null <<SQL || log_warn "Wordfence silencing had issues"
+UPDATE ${p}wfconfig SET val='' WHERE name='alertEmails';
+UPDATE ${p}wfconfig SET val='0' WHERE name LIKE 'alertOn\_%';
+UPDATE ${p}wfconfig SET val='0' WHERE name IN ('email_summary_enabled','email_summary_dashboard_widget_enabled');
+DELETE FROM ${p}wfconfig WHERE name LIKE 'wordfenceCentral%';
+SQL
+  return 0
+}
+
 # Write the compatibility mu-plugin into a replica's wp-content (creating mu-plugins/ if needed).
 # This prevents plugins (like aule) that globally call admin-only functions from breaking WP-CLI.
 _inject_wpsite_compat_muplugin() { # wp_content_dir
@@ -399,6 +480,32 @@ _ensure_local_dns() { # host
   _add_hosts_entry "$1"
 }
 
+# Dev PHP overrides, mounted into the container's conf.d (see _render_compose).
+# The stock php:apache image caps upload_max_filesize at 2M / post_max_size at 8M,
+# which fails plugin/theme uploads and imports on a dev replica. Written to the
+# docker dir (wiped + regenerated each build) so it always matches the compose file.
+_write_php_ini() { # dest_file
+  # Resource/upload/timezone directives lifted from our house php.ini-production
+  # profile (repo: masterphp.ini) so replicas match our real hosts. Error-handling
+  # is left to the image + WORDPRESS_CONFIG_EXTRA dev-debug setup, NOT this file —
+  # masterphp.ini is a production profile (display_errors/log_errors Off) that would
+  # fight WP_DEBUG on a dev replica, so only the resource group is carried over.
+  cat <<'EOF' > "$1"
+; wpsite dev PHP overrides — house defaults from masterphp.ini (resource group).
+upload_max_filesize = 32M
+post_max_size = 32M
+memory_limit = 256M
+max_execution_time = 240
+max_input_time = 240
+max_input_vars = 1500
+max_file_uploads = 20
+date.timezone = "Europe/Berlin"
+; Trap native PHP mail() too (plugins that bypass wp_mail): route it through our
+; shim → Mailpit. The shim is installed into the container by _install_sendmail_shim.
+sendmail_path = "/usr/local/bin/wpsite-sendmail -t -i"
+EOF
+}
+
 # Render the per-replica compose file. No published host port: the WordPress
 # container joins the shared proxy network so Traefik can reach it by name
 # (wp_<client>_app). db stays on the project's default network only.
@@ -448,6 +555,9 @@ $prefix_line
 $extra
     volumes:
       - ./wp-content:/var/www/html/wp-content
+      # Dev PHP limits (uploads/memory) — stock php:apache defaults cap uploads at
+      # 2M, which blocks installing modestly sized plugins/themes. See _write_php_ini.
+      - ./php-wpsite.ini:/usr/local/etc/php/conf.d/wpsite.ini:ro
     networks:
       - default
       - proxy
@@ -605,6 +715,8 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
   # needed; otherwise fall back to a per-host /etc/hosts entry (sudo).
   if [ "$is_ms" = "1" ]; then _ms_ensure_dns "$sites_csv" "$ms_ns"; else _ensure_local_dns "$local_host"; fi
 
+  # Must exist as a FILE before `up -d`, or Docker creates a dir at the mount point.
+  _write_php_ini php-wpsite.ini
   _render_compose "$db_c" "$app_c" "$image" "$target" "$local_host" "$ms_php" "$table_prefix" > docker-compose.yml
 
   # Start the shared infra (proxy + Mailpit) — both create/use the proxy network
@@ -614,6 +726,9 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
 
   log_info "Starting containers..."
   docker compose -p "$project" up -d
+
+  # Complete the mail trap: route native PHP mail() (not just wp_mail) to Mailpit.
+  _install_sendmail_shim "$app_c"
 
   # Register the replica's route with the proxy (Traefik picks it up via file-watch).
   # Multisite lists every subsite domain; single-site is the one host.
@@ -665,6 +780,10 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
     _sanitize_plugins "$app_c" "$extra_deactivate"
     _set_known_admin "$app_c" "$local_url"
   fi
+
+  # Stop Wordfence emailing out (Central/HTTPS alerts bypass Mailpit entirely).
+  # Pure SQL, independent of the wp-cli branch above; no-op if Wordfence is absent.
+  _silence_wordfence "$db_c" "$table_prefix"
 
   # Real liveness check — WordPress must see itself as installed. Catches a table
   # prefix mismatch (the symptom: wp-cli prints "site not installed / Found
