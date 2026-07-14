@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "wpsite-gui",
+        "title": "wpsite – WordPress-Kopien",
         "width": 800,
         "height": 600
       }

@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# wpsite mail <up|down|status> — a shared Mailpit container that TRAPS all email
+# wpsite mail <start|stop|status> — a shared Mailpit container that TRAPS all email
 # every replica tries to send (production data → real customer addresses, so this
 # is a safety net). `build` starts it automatically and drops a mu-plugin into the
 # replica that routes wp_mail() to it. Inbox: http://localhost:<ui-port>.
@@ -64,8 +64,8 @@ cmd_mail() {
   local sub="${1:-status}"
   [ $# -gt 0 ] && shift
   case "$sub" in
-    up)     _mail_ensure; log_ok "Mailpit up — inbox: http://localhost:$WPSITE_MAIL_UI_PORT" ;;
-    down)   require docker
+    start|up)  _mail_ensure; log_ok "Mailpit started — inbox: http://localhost:$WPSITE_MAIL_UI_PORT" ;;
+    stop|down) require docker
             if docker rm -f "$WPSITE_MAIL_CONTAINER" >/dev/null 2>&1; then
               log_ok "Mailpit stopped."
             else
@@ -77,6 +77,6 @@ cmd_mail() {
             else
               log_info "Mailpit not running (starts automatically on 'wpsite build')."
             fi ;;
-    *) die "Unknown: wpsite mail $sub (expected up|down|status)" ;;
+    *) die "Unknown: wpsite mail $sub (expected start|stop|status)" ;;
   esac
 }

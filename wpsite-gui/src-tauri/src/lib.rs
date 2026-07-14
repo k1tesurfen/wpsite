@@ -10,11 +10,14 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn get_clients() -> Result<Vec<String>, String> {
-    // Find client names using yq. We search /opt/homebrew/bin/yq and other standard paths in PATH
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg("yq -r '.clients | keys | .[]' ~/.config/wpsite/wpsite.yml")
-        .env("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+    // Ask the CLI for the client names — it is the source of truth and knows about
+    // the shared TEAM config in Google Drive (the client list no longer lives in the
+    // local config file). `wpsite list --names` prints one name per line to stdout and
+    // degrades to empty (with a stderr warning) when Drive is unmounted.
+    let output = Command::new("/usr/local/bin/wpsite")
+        .arg("list")
+        .arg("--names")
+        .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin")
         .output();
 
     match output {
@@ -29,11 +32,26 @@ fn get_clients() -> Result<Vec<String>, String> {
                 Ok(clients)
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                Err(format!("yq failed: {}", stderr))
+                Err(format!("wpsite list failed: {}", stderr))
             }
         }
-        Err(e) => Err(format!("Failed to execute yq command: {}", e)),
+        Err(e) => Err(format!("Failed to run wpsite: {}", e)),
     }
+}
+
+// Onboarding (`wpsite setup`) and key install are INTERACTIVE (prompts, SSH host-key
+// confirmations, server passwords), which the piped command runner below cannot drive.
+// So open Terminal.app and run it there, where the user has a real interactive shell.
+#[tauri::command]
+fn open_setup_terminal() -> Result<(), String> {
+    Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"Terminal\" to do script \"wpsite setup\"")
+        .arg("-e")
+        .arg("tell application \"Terminal\" to activate")
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Terminal konnte nicht geöffnet werden: {}", e))
 }
 
 #[tauri::command]
@@ -65,8 +83,8 @@ fn run_wpsite_command(app: tauri::AppHandle, cmd: String, client: Option<String>
         {
             Ok(c) => c,
             Err(e) => {
-                let err_msg = format!("Failed to spawn wpsite command: {}", e);
-                let _ = app.emit("wpsite-log", format!("Error: {}\n", err_msg));
+                let err_msg = format!("wpsite konnte nicht gestartet werden: {}", e);
+                let _ = app.emit("wpsite-log", format!("Fehler: {}\n", err_msg));
                 let _ = app.emit("wpsite-finished", ());
                 return;
             }
@@ -109,14 +127,14 @@ fn run_wpsite_command(app: tauri::AppHandle, cmd: String, client: Option<String>
         match status {
             Ok(s) => {
                 let exit_msg = if s.success() {
-                    format!("Command completed successfully.\n")
+                    format!("Befehl erfolgreich abgeschlossen.\n")
                 } else {
-                    format!("Command exited with status: {}\n", s)
+                    format!("Befehl mit Status beendet: {}\n", s)
                 };
                 let _ = app.emit("wpsite-log", exit_msg);
             }
             Err(e) => {
-                let _ = app.emit("wpsite-log", format!("Error waiting for process: {}\n", e));
+                let _ = app.emit("wpsite-log", format!("Fehler beim Warten auf den Prozess: {}\n", e));
             }
         }
 
@@ -131,7 +149,7 @@ fn run_wpsite_command(app: tauri::AppHandle, cmd: String, client: Option<String>
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, get_clients, run_wpsite_command])
+        .invoke_handler(tauri::generate_handler![greet, get_clients, run_wpsite_command, open_setup_terminal])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

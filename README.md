@@ -9,6 +9,11 @@ placeholder images/videos.
 
 ## Install
 
+> **New team member / non-technical?** Follow the plain-language, click-by-click guide
+> instead — **[INSTALL.md](INSTALL.md)** (English) / **[INSTALL.de.md](INSTALL.de.md)**
+> (Deutsch). It covers Homebrew, Docker, copying wpsite from the shared Google Drive, and
+> `wpsite setup`. The steps below are the short technical version.
+
 ```bash
 brew install yq imagemagick ffmpeg
 brew install --cask docker        # or Docker Desktop / OrbStack
@@ -18,11 +23,15 @@ git clone <this repo> && cd wpsite
                                   #   (WPSITE_BIN_DIR=~/.local/bin ./install.sh to change;
                                   #    ./install.sh --uninstall to remove)
 
-mkdir -p ~/.config/wpsite
-cp wpsite.yml.example ~/.config/wpsite/wpsite.yml   # then edit
-
+wpsite setup                      # writes the local config (base_dir, cloud_base,
+                                  #   team_config) + installs your SSH key on every
+                                  #   client in the shared team config
 wpsite doctor                     # verify everything is ready
 ```
+
+Solo / no shared team config? Skip `setup` and hand-write the local config instead:
+`mkdir -p ~/.config/wpsite && cp wpsite.yml.example ~/.config/wpsite/wpsite.yml` (clients
+live in this file when `team_config:` is unset). See [Configuration](#configuration).
 
 ## Usage
 

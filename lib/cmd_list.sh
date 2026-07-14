@@ -1,9 +1,18 @@
 # shellcheck shell=bash
 # wpsite list [client] — without a client, list all clients + backup counts;
 # with a client, list that client's individual backups (newest first).
+# wpsite list --names — machine-readable: client names only, one per line, to
+# stdout (team-aware, via config_clients). Used by the GUI / scripting.
 
 cmd_list() {
   config_require
+  # Porcelain: just the client names (stdout, one per line). Team-aware — resolves
+  # the shared team config, and degrades to empty (with a stderr warning) if Drive
+  # is unmounted, so a caller never crashes.
+  if [ "${1:-}" = "--names" ]; then
+    config_clients
+    return 0
+  fi
   if [ -n "${1:-}" ]; then
     if config_has_dev "$1"; then
       _list_dev_site "$1"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # wpsite db — the shared Adminer DB browser. Covers the sub-dispatcher
-# (up/down/status + usage/flag guards) and the open flow (target resolution,
+# (start/stop/status + usage/flag guards) and the open flow (target resolution,
 # db-running guard, and the auto-login URL handed to `open`). Docker + `open`
 # are stubbed so nothing real runs.
 
@@ -74,7 +74,13 @@ EOF
   [[ "$output" == *"$WPSITE_ADMINER_PORT"* ]]
 }
 
-@test "db down: nothing running -> 'was not running', exit 0" {
+@test "db stop: nothing running -> 'was not running', exit 0" {
+  run cmd_db stop
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"was not running"* ]]
+}
+
+@test "db down: still accepted as an alias for stop" {
   run cmd_db down
   [ "$status" -eq 0 ]
   [[ "$output" == *"was not running"* ]]

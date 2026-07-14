@@ -36,9 +36,13 @@ wpsite $VERSION — WordPress backup & local replica tool
 Usage: wpsite <command> [args]
 
 Commands:
-  backup  <client>    Snapshot a remote site (media → placeholders to stay small)
+  setup               Onboard this machine: write the local config (base_dir,
+                      cloud_base, team_config) + install your SSH key on every
+                      client in the shared team config. Run once per machine.
+          --keys-only     …skip config; just (re)install keys for team clients
+  backup  <client>    Snapshot a remote site (real media by default)
           --all       …back up every configured client, in sequence
-          --full      …include real media files instead of placeholders
+          --light     …use blank placeholder media instead of real files (smaller)
           --persist   …mark the new backup permanent (exempt from rolling prune)
   backup sync [<client>]   Reconcile local backups with the cloud (cloud = truth;
           --all --dry-run   no arg / --all syncs every client)
@@ -65,17 +69,18 @@ Commands:
   apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
                       typed confirmation; irreversible — rehearse first)
   destroy <site>      Remove a replica or dev site (containers + DB volume + files)
-  prune   <client>    Delete old backups from local + cloud (default: keep newest
-          --all           keep_backups, default 4; skips -permanent). Flags: --keep N,
+  prune   <client>    Delete old backups from local + cloud (default: keep newest 5,
+          --all           the fixed policy; skips -permanent). Flags: --keep N,
           <id>            --older-than Nd, --dry-run, --yes. Give a <backup-id> to
                           delete just that one (even if permanent).
   proxy   <action>    Shared reverse proxy + wildcard DNS for running all replicas
-                      at once: up | down | status | install-dns
-  mail    <action>    Shared Mailpit that traps all replica email: up | down | status
+                      at once: start | stop | status | install-dns
+  mail    <action>    Shared Mailpit that traps all replica email: start | stop | status
   db      <site>      Open a shared Adminer DB browser, logged into <site>'s database
                       (any built client or dev site); no <site> reopens the last one.
-                      Manage the container with up | down | status
+                      Manage the container with start | stop | status
   list    [site]      List clients + backups + dev sites (or one site's detail)
+          --names         …just client names, one per line (machine-readable)
   status              Show running replicas + dev sites and their URLs
   doctor              Verify dependencies and environment
   test    <client>    Verify remote host connection, directories, and CLI/DB readiness
@@ -104,6 +109,7 @@ main() {
 
   local cmd="$1"; shift
   case "$cmd" in
+    setup)   cmd_setup "$@" ;;
     backup)  cmd_backup "$@" ;;
     build)   cmd_build "$@" ;;
     client)  cmd_client "$@" ;;

@@ -63,36 +63,96 @@ expand_tilde() {
 # yq query helper; prints empty string for missing keys (never the literal "null").
 _yq() { yq -r "$1 // \"\"" "$WPSITE_CONFIG"; }
 
+# ---------------------------------------------------------------------------
+# Two-layer config: the LOCAL file ($WPSITE_CONFIG) holds machine-specific settings
+# (base_dir, cloud_base) + this user's dev sites; the shared TEAM file (in Google
+# Drive) holds the .clients map so a whole team shares one set of client definitions.
+# The local file points at the team file via `team_config:` (a per-user path, since
+# every Drive mount differs); WPSITE_TEAM_CONFIG overrides it (tests). When no team
+# file is configured, clients fall back to the local file — so a pre-split / solo
+# setup keeps working unchanged. Team is authoritative: clients are NEVER redefined
+# locally, so there is no merge/precedence logic.
+# ---------------------------------------------------------------------------
+
+# Resolved path of the shared team config, or empty when the feature isn't set up.
+_team_config_path() {
+  if [ -n "${WPSITE_TEAM_CONFIG:-}" ]; then printf '%s' "$WPSITE_TEAM_CONFIG"; return 0; fi
+  local p; p="$(yq -r '.team_config // ""' "$WPSITE_CONFIG" 2>/dev/null || true)"
+  [ -n "$p" ] && expand_tilde "$p"
+  return 0
+}
+
+# The file that holds .clients, for READS. Prints the team file when configured and
+# present, else the local file (fallback). Returns non-zero (printing nothing) when a
+# team file IS configured but missing (Drive unmounted) — callers warn + degrade.
+_client_file() {
+  local t; t="$(_team_config_path)"
+  if [ -z "$t" ]; then printf '%s' "$WPSITE_CONFIG"; return 0; fi
+  [ -f "$t" ] || return 1
+  printf '%s' "$t"
+}
+
+# Like _client_file but for WRITES: a configured-but-missing team file is fatal (we
+# must never silently write a client into the local file where the team can't see it).
+_client_file_w() {
+  local t; t="$(_team_config_path)"
+  if [ -z "$t" ]; then printf '%s' "$WPSITE_CONFIG"; return 0; fi
+  [ -f "$t" ] || die "Team config not found at $t — is your Google Drive mounted? Client changes must write to the shared team config."
+  printf '%s' "$t"
+}
+
+# One-line warning (once per process) when the configured team file is unreachable.
+_WPSITE_TEAM_WARNED=""
+_warn_team_unreachable() {
+  [ -n "$_WPSITE_TEAM_WARNED" ] && return 0
+  _WPSITE_TEAM_WARNED=1
+  log_warn "Team config unreachable at $(_team_config_path) — is your Google Drive mounted? No clients are visible."
+  return 0
+}
+
 config_base_dir() {
   local d; d="$(_yq '.base_dir')"
   [ -n "$d" ] || die "base_dir not set in $WPSITE_CONFIG"
   expand_tilde "$d"
 }
 
-config_clients() { yq -r '.clients | keys | .[]' "$WPSITE_CONFIG"; }
+# All client read/write helpers below resolve their file through _client_file(_w) so
+# they act on the shared TEAM config when one is set, or the local file as a fallback.
+config_clients() {
+  local f; f="$(_client_file)" || { _warn_team_unreachable; return 0; }
+  yq -r '(.clients // {}) | keys | .[]' "$f"
+}
 
-config_has_client() { yq -e ".clients.\"$1\"" "$WPSITE_CONFIG" >/dev/null 2>&1; }
+config_has_client() {
+  local f; f="$(_client_file)" || return 1
+  yq -e ".clients.\"$1\"" "$f" >/dev/null 2>&1
+}
 
-# client_get <client> <key> — reads .clients.<client>.<key>
-client_get() { _yq ".clients.\"$1\".\"$2\""; }
+# client_get <client> <key> — reads .clients.<client>.<key> (empty if unreachable).
+client_get() {
+  local f; f="$(_client_file)" || return 0
+  yq -r "(.clients.\"$1\".\"$2\") // \"\"" "$f"
+}
 
-# client_set <client> <key> <value> — in-place config write (yq -i, NOT eval/source;
-# preserves comments). yq appends a brand-new client at the end of .clients. Strings
-# only — fine for ssh/wp_root/local_host/... fields (list fields stay hand-edited).
+# client_set <client> <key> <value> — in-place write to the team file (yq -i, NOT
+# eval/source; preserves comments). yq appends a brand-new client at the end of
+# .clients. Strings only — fine for ssh/wp_root/local_host/... (list fields hand-edited).
 client_set() { # client key value
-  yq -i ".clients.\"$1\".\"$2\" = \"$3\"" "$WPSITE_CONFIG"
+  local f; f="$(_client_file_w)"
+  yq -i ".clients.\"$1\".\"$2\" = \"$3\"" "$f"
 }
 
 # Remove a client's whole config entry (used by `client remove` / to roll back a failed add).
-config_remove_client() { yq -i "del(.clients.\"$1\")" "$WPSITE_CONFIG"; }
+config_remove_client() { local f; f="$(_client_file_w)"; yq -i "del(.clients.\"$1\")" "$f"; }
 
 # client_unset <client> <key> — delete one key under a client (used by `client edit --unset`).
-client_unset() { yq -i "del(.clients.\"$1\".\"$2\")" "$WPSITE_CONFIG"; }
+client_unset() { local f; f="$(_client_file_w)"; yq -i "del(.clients.\"$1\".\"$2\")" "$f"; }
 
 require_client() { # client_name
-  local c="$1"
+  local c="$1" where
   [ -n "$c" ] || die "No client specified."
-  config_has_client "$c" || die "Client '$c' not found in $WPSITE_CONFIG"
+  where="$(_team_config_path)"; [ -n "$where" ] || where="$WPSITE_CONFIG"
+  config_has_client "$c" || die "Client '$c' not found in $where"
 }
 
 # ---------------------------------------------------------------------------
@@ -161,47 +221,64 @@ config_cloud_base() {
   return 0
 }
 
-# Rolling-retention count. Default 4; global .keep_backups overrides the default.
-config_keep_backups() {
-  local n; n="$(_yq '.keep_backups')"
-  case "$n" in ''|*[!0-9]*) printf '4' ;; *) printf '%s' "$n" ;; esac
-}
+# Rolling retention is a FIXED team-wide policy: keep the newest 5 non-permanent
+# backups per client. Deliberately NOT configurable — everyone prunes to the same
+# depth on the shared cloud. Persist a backup (`--persist`) to exempt it. These stay
+# functions (arg-tolerant) so callers don't change.
+WPSITE_KEEP_BACKUPS=5
+config_keep_backups() { printf '%s' "$WPSITE_KEEP_BACKUPS"; }
+client_keep_backups() { printf '%s' "$WPSITE_KEEP_BACKUPS"; }
 
-# Retention for one client: clients.<c>.keep_backups → global → 4.
-client_keep_backups() { # client
-  local n; n="$(client_get "$1" keep_backups)"
-  case "$n" in ''|*[!0-9]*) config_keep_backups ;; *) printf '%s' "$n" ;; esac
-}
-
-# Production domain (host only, no proto/path/port/www) from the newest backup's
-# meta.env SOURCE_HOME — the default cloud subfolder name. Empty if none yet.
+# Production domain (host only, no proto/path/port/www) from a backup's meta.env
+# SOURCE_HOME — the default cloud subfolder name. Empty if none yet. Scans backups
+# newest→oldest and uses the first with a valid SOURCE_HOME, so an incomplete newest
+# backup (interrupted run, no meta.env) doesn't hide the domain earlier runs recorded.
 _cloud_domain_from_meta() { # client
-  local backup_dir latest meta source_home host
+  local backup_dir d meta source_home host
   backup_dir="$(client_backup_dir "$1")"
   [ -d "$backup_dir" ] || return 0
-  # shellcheck disable=SC2012  # timestamp dirs; mtime sort via ls is fine
-  latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"; latest="${latest%/}"
-  [ -n "$latest" ] || return 0
-  meta="$latest/meta.env"
-  [ -f "$meta" ] || return 0
-  source_home="$(grep -m1 '^SOURCE_HOME=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
-  [ -n "$source_home" ] || return 0
-  host="${source_home#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host#www.}"
-  printf '%s' "$host"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    meta="${d%/}/meta.env"
+    [ -f "$meta" ] || continue
+    source_home="$(grep -m1 '^SOURCE_HOME=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
+    [ -n "$source_home" ] || continue
+    host="${source_home#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host#www.}"
+    printf '%s' "$host"
+    return 0
+  done < <(
+    # shellcheck disable=SC2012  # timestamp dirs; mtime sort via ls is fine
+    ls -td "$backup_dir"/*/ 2>/dev/null
+  )
+  return 0
 }
 
-# Cloud backup dir for a client. Override (clients.<c>.cloud_dir) is an absolute
-# path used verbatim; otherwise <cloud_base>/<production-domain>. Empty when
-# cloud_base is unset (feature off) or no domain can be derived yet.
+# Backups live in a fixed subfolder INSIDE each domain's project folder — never at
+# the domain root. The rest of the domain folder (assets, layout, kunde input, …) is
+# the team's working folder and must never be touched by wpsite.
+WPSITE_CLOUD_BACKUP_SUBDIR="100_Backup"
+
+# Cloud backup dir for a client, as <cloud_base>/<project-folder>/100_Backup.
+# The <project-folder> is, in order of precedence:
+#   1. clients.<c>.cloud_dir  — a FULL absolute path, used verbatim (machine-specific,
+#      discouraged in the shared team config; escape hatch only).
+#   2. clients.<c>.cloud_folder — just the folder NAME under cloud_base (PORTABLE:
+#      resolves against each colleague's own cloud_base). Use this when the site's
+#      backup domain (a staging/dev URL) doesn't match the curated Drive folder name.
+#   3. the production domain derived from meta.env (_cloud_domain_from_meta).
+# Empty when cloud_base is unset (feature off) or no folder can be determined. The
+# domain folder itself is NEVER created — cloud_available() requires it to pre-exist,
+# so only the 100_Backup subfolder is ever written.
 client_cloud_dir() { # client
   local override; override="$(client_get "$1" cloud_dir)"
   if [ -n "$override" ]; then expand_tilde "$override"; return 0; fi
-  local base domain
+  local base folder
   base="$(config_cloud_base)"
   [ -n "$base" ] || return 0
-  domain="$(_cloud_domain_from_meta "$1")"
-  [ -n "$domain" ] || return 0
-  printf '%s/%s' "${base%/}" "$domain"
+  folder="$(client_get "$1" cloud_folder)"
+  [ -n "$folder" ] || folder="$(_cloud_domain_from_meta "$1")"
+  [ -n "$folder" ] || return 0
+  printf '%s/%s/%s' "${base%/}" "$folder" "$WPSITE_CLOUD_BACKUP_SUBDIR"
 }
 
 # True when a client's cloud dir resolves AND its parent (the Drive mount) exists

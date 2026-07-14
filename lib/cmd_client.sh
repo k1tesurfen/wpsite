@@ -20,14 +20,15 @@ Usage:
     --wp-root <path>      Absolute path to the WordPress install on that server
     --local-host <host>   Local .test hostname (default: <name>.test)
     --remote-tmp <path>   Remote backup staging dir (default: /tmp)
-    --cloud-dir <path>    Full path override for this client's cloud backups
-    --keep-backups <n>    Per-client rolling-retention override
+    --cloud-dir <path>    Full absolute path override for cloud backups (machine-specific)
+    --cloud-folder <name> Project-folder NAME under cloud_base (portable; use when the
+                          backup domain differs from the Drive folder name)
     --key <path>          SSH identity to install (default: your agent/default key)
     --no-copy-id          Skip ssh-copy-id (assume key access already works)
     --no-test             Skip the post-add `wpsite test` readiness check
 
   edit — same field flags as add, plus:
-    --unset <key>         Clear an optional key (local_host|remote_tmp|cloud_dir|keep_backups)
+    --unset <key>         Clear an optional key (local_host|remote_tmp|cloud_dir|cloud_folder)
     --copy-id             Re-run ssh-copy-id for the (new) SSH target
     --no-test             Skip the readiness test after an ssh/wp_root change
     (no field flags on a TTY → interactive; Enter keeps each [current] value)
@@ -51,6 +52,20 @@ cmd_client() {
   esac
 }
 
+# Warn (non-fatally) if a chosen cloud_folder doesn't exist under cloud_base yet —
+# catches typos at onboarding. Backups only ever write INTO an existing project folder
+# (wpsite never creates one), so a missing folder means cloud sync would be skipped.
+_client_check_cloud_folder() { # folder
+  local folder="$1" cb
+  [ -n "$folder" ] || return 0
+  cb="$(config_cloud_base)"
+  [ -n "$cb" ] || return 0
+  if [ -d "$cb" ] && [ ! -d "$cb/$folder" ]; then
+    log_warn "  '$folder' not found under cloud_base yet — create it in Drive, or fix the name."
+  fi
+  return 0
+}
+
 # Return the local PUBLIC key path to append. With an identity arg, use it (adding
 # .pub if needed); otherwise probe the common default key names. Non-zero if none.
 _client_find_pubkey() { # [identity]
@@ -64,6 +79,24 @@ _client_find_pubkey() { # [identity]
     if [ -f "$HOME/.ssh/$k.pub" ]; then printf '%s' "$HOME/.ssh/$k.pub"; return 0; fi
   done
   return 1
+}
+
+# Make sure the user has a personal SSH key, generating one if not (a fresh Mac has
+# none). ed25519, into the standard ~/.ssh/id_ed25519. ssh-keygen prompts for a
+# passphrase — pressing Enter twice makes a passphrase-free key (simplest); setting one
+# is more secure. Returns non-zero (with guidance) only if ssh-keygen is unavailable.
+_ensure_ssh_key() {
+  _client_find_pubkey >/dev/null 2>&1 && return 0    # already have a usable key
+  if ! have ssh-keygen; then
+    log_warn "No SSH key found and ssh-keygen is unavailable — create one, then re-run:"
+    log_warn "  ssh-keygen -t ed25519"
+    return 1
+  fi
+  log_info "No SSH key found — creating one now at ~/.ssh/id_ed25519."
+  log_info "  When asked for a passphrase: press Enter twice for none (simplest), or type"
+  log_info "  one for extra security (macOS can remember it in your Keychain)."
+  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+  ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -C "wpsite-$(id -un)@$(hostname -s 2>/dev/null || hostname)"
 }
 
 # Ensure key-based SSH auth to <target> works. Probe first (accept-new so a
@@ -101,8 +134,8 @@ _client_setup_ssh_key() { # target [identity]
 }
 
 _client_add() {
-  local name="" ssh_target="" wp_root="" local_host="" remote_tmp="" cloud_dir="" keep_backups=""
-  local key="" do_copyid=1 do_test=1 cloud_dir_set=0
+  local name="" ssh_target="" wp_root="" local_host="" remote_tmp="" cloud_dir="" cloud_folder=""
+  local key="" do_copyid=1 do_test=1
   while [ $# -gt 0 ]; do
     case "$1" in
       --ssh)            ssh_target="${2:-}"; shift 2 ;;
@@ -113,10 +146,10 @@ _client_add() {
       --local-host=*)   local_host="${1#*=}"; shift ;;
       --remote-tmp)     remote_tmp="${2:-}"; shift 2 ;;
       --remote-tmp=*)   remote_tmp="${1#*=}"; shift ;;
-      --cloud-dir)      cloud_dir="${2:-}"; cloud_dir_set=1; shift 2 ;;
-      --cloud-dir=*)    cloud_dir="${1#*=}"; cloud_dir_set=1; shift ;;
-      --keep-backups)   keep_backups="${2:-}"; shift 2 ;;
-      --keep-backups=*) keep_backups="${1#*=}"; shift ;;
+      --cloud-dir)      cloud_dir="${2:-}"; shift 2 ;;
+      --cloud-dir=*)    cloud_dir="${1#*=}"; shift ;;
+      --cloud-folder)   cloud_folder="${2:-}"; shift 2 ;;
+      --cloud-folder=*) cloud_folder="${1#*=}"; shift ;;
       --key)            key="${2:-}"; shift 2 ;;
       --key=*)          key="${1#*=}"; shift ;;
       --no-copy-id)     do_copyid=0; shift ;;
@@ -156,28 +189,30 @@ _client_add() {
       done
     fi
 
-    # cloud_dir: only meaningful when cloud sync is configured. The default location
-    # can't be computed yet — it derives from the FIRST backup's production domain —
-    # so offer to pin an explicit path now (so this important setting isn't forgotten).
-    local cb; cb="$(config_cloud_base)"
-    if [ -n "$cb" ] && [ "$cloud_dir_set" = 0 ]; then
-      log_info "Cloud sync is on. Backups default to <cloud_base>/<domain>, where <domain>"
-      log_info "  is read from this client's FIRST backup (not known yet)."
-      local ans; ans="$(_prompt "Use that default cloud location? [Y/n]" "Y")"
-      case "$ans" in
-        [nN]*) cloud_dir="$(_prompt "  Cloud backup dir (full absolute path)")"; cloud_dir_set=1 ;;
-      esac
+    # Cloud project folder: backups sync to <cloud_base>/<folder>/100_Backup. By default
+    # <folder> is derived from the site's own domain on first backup — correct for a live
+    # site. But a site still under construction lives on *.wird.cool, whose backups belong
+    # under the FINAL client-domain folder in LIVE_WEB. Since cloud_base is a per-user LOCAL
+    # path, we only store the portable folder NAME (cloud_folder), never an absolute path.
+    if [ -z "$cloud_folder" ]; then
+      local cb; cb="$(config_cloud_base)"
+      if [ -n "$cb" ]; then
+        log_info "Backups sync to <cloud_base>/<folder>/100_Backup."
+        log_info "  For a site still on *.wird.cool, enter its FINAL client-domain folder."
+        cloud_folder="$(_prompt "Cloud project folder (blank = derive from the site's domain)")"
+        _client_check_cloud_folder "$cloud_folder"   # typo/missing-folder warning (non-fatal)
+      fi
     fi
 
-    # Advanced overrides — gated so the common path stays short.
-    local adv; adv="$(_prompt "Set advanced options (local_host, remote_tmp, keep_backups)? [y/N]" "N")"
+    # Advanced overrides — gated so the common path stays short. (Retention is a fixed
+    # team policy of 5 — see WPSITE_KEEP_BACKUPS — so there's no keep_backups prompt.)
+    local adv; adv="$(_prompt "Set advanced options (local_host, remote_tmp)? [y/N]" "N")"
     case "$adv" in
       [yY]*)
         local d_host="$name.test"
         local_host="$(_prompt "  Local host" "$d_host")"
         if [ "$local_host" = "$d_host" ]; then local_host=""; fi   # default → leave unset
         remote_tmp="$(_prompt "  Remote temp dir (blank = /tmp)")"
-        keep_backups="$(_prompt "  Keep backups (blank = global default/4)")"
         ;;
     esac
   fi
@@ -190,20 +225,23 @@ _client_add() {
   case "$wp_root" in /*) : ;; *) die "wp_root must be an absolute path: $wp_root" ;; esac
 
   # Write the config entry first, so `wpsite test` reads the real entry and the client
-  # is recoverable/editable even if the key setup or test below fails.
-  log_info "Adding client '$name' to $WPSITE_CONFIG"
+  # is recoverable/editable even if the key setup or test below fails. client_set writes
+  # to the shared TEAM config (or the local file when no team config is set up).
+  local cfg_where; cfg_where="$(_team_config_path)"; [ -n "$cfg_where" ] || cfg_where="$WPSITE_CONFIG"
+  log_info "Adding client '$name' to $cfg_where"
   _ensure_base_layout
   client_set "$name" ssh "$ssh_target"
   client_set "$name" wp_root "$wp_root"
-  if [ -n "$local_host" ];   then client_set "$name" local_host   "$local_host";   fi
-  if [ -n "$remote_tmp" ];   then client_set "$name" remote_tmp   "$remote_tmp";   fi
-  if [ -n "$cloud_dir" ];    then client_set "$name" cloud_dir    "$cloud_dir";    fi
-  if [ -n "$keep_backups" ]; then client_set "$name" keep_backups "$keep_backups"; fi
+  if [ -n "$local_host" ];    then client_set "$name" local_host    "$local_host";    fi
+  if [ -n "$remote_tmp" ];    then client_set "$name" remote_tmp    "$remote_tmp";    fi
+  if [ -n "$cloud_dir" ];     then client_set "$name" cloud_dir     "$cloud_dir";     fi
+  if [ -n "$cloud_folder" ];  then client_set "$name" cloud_folder  "$cloud_folder";  fi
   log_ok "  Config entry written."
 
   echo
   if [ "$do_copyid" = 1 ]; then
     log_info "Setting up key-based SSH access..."
+    [ -n "$key" ] || _ensure_ssh_key || true   # make sure a default key exists first
     if _client_setup_ssh_key "$ssh_target" "$key"; then
       log_ok "  SSH key access ready."
     else
@@ -238,8 +276,8 @@ _client_add() {
 # ---------------------------------------------------------------------------
 _client_edit() {
   local name="" key="" do_test=1 do_copyid=0 any_flag=0
-  local ssh_new="" wp_new="" lh_new="" rt_new="" cd_new="" kb_new=""
-  local ssh_set=0 wp_set=0 lh_set=0 rt_set=0 cd_set=0 kb_set=0
+  local ssh_new="" wp_new="" lh_new="" rt_new="" cd_new="" cf_new=""
+  local ssh_set=0 wp_set=0 lh_set=0 rt_set=0 cd_set=0 cf_set=0
   local -a unset_keys=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -253,8 +291,8 @@ _client_edit() {
       --remote-tmp=*)   rt_new="${1#*=}"; rt_set=1; any_flag=1; shift ;;
       --cloud-dir)      cd_new="${2:-}"; cd_set=1; any_flag=1; shift 2 ;;
       --cloud-dir=*)    cd_new="${1#*=}"; cd_set=1; any_flag=1; shift ;;
-      --keep-backups)   kb_new="${2:-}"; kb_set=1; any_flag=1; shift 2 ;;
-      --keep-backups=*) kb_new="${1#*=}"; kb_set=1; any_flag=1; shift ;;
+      --cloud-folder)   cf_new="${2:-}"; cf_set=1; any_flag=1; shift 2 ;;
+      --cloud-folder=*) cf_new="${1#*=}"; cf_set=1; any_flag=1; shift ;;
       --unset)          unset_keys+=("${2:-}"); any_flag=1; shift 2 ;;
       --unset=*)        unset_keys+=("${1#*=}"); any_flag=1; shift ;;
       --key)            key="${2:-}"; shift 2 ;;
@@ -280,8 +318,8 @@ _client_edit() {
     c="$(client_get "$name" wp_root)";       wp_new="$(_prompt "Remote WordPress root (absolute path)" "$c")"; wp_set=1
     c="$(client_get "$name" local_host)";    lh_new="$(_prompt "Local host (blank = default <name>.test)" "$c")"; lh_set=1
     c="$(client_get "$name" remote_tmp)";    rt_new="$(_prompt "Remote temp dir (blank = /tmp)" "$c")"; rt_set=1
-    c="$(client_get "$name" cloud_dir)";     cd_new="$(_prompt "Cloud backup dir (blank = default)" "$c")"; cd_set=1
-    c="$(client_get "$name" keep_backups)";  kb_new="$(_prompt "Keep backups (blank = global/4)" "$c")"; kb_set=1
+    c="$(client_get "$name" cloud_dir)";     cd_new="$(_prompt "Cloud backup dir override (blank = default)" "$c")"; cd_set=1
+    c="$(client_get "$name" cloud_folder)";  cf_new="$(_prompt "Cloud project-folder name (blank = derive from domain)" "$c")"; cf_set=1
   fi
 
   local changed=0 ssh_changed=0 wp_changed=0
@@ -302,19 +340,19 @@ _client_edit() {
   fi
 
   # Optionals: an empty value here means "leave as-is" (clear with --unset instead).
-  if _client_edit_opt "$name" local_host   "$lh_set" "$lh_new"; then changed=1; fi
-  if _client_edit_opt "$name" remote_tmp   "$rt_set" "$rt_new"; then changed=1; fi
-  if _client_edit_opt "$name" cloud_dir    "$cd_set" "$cd_new"; then changed=1; fi
-  if _client_edit_opt "$name" keep_backups "$kb_set" "$kb_new"; then changed=1; fi
+  if _client_edit_opt "$name" local_host    "$lh_set" "$lh_new"; then changed=1; fi
+  if _client_edit_opt "$name" remote_tmp    "$rt_set" "$rt_new"; then changed=1; fi
+  if _client_edit_opt "$name" cloud_dir     "$cd_set" "$cd_new"; then changed=1; fi
+  if _client_edit_opt "$name" cloud_folder  "$cf_set" "$cf_new"; then changed=1; fi
 
   # Unsets (optional keys only).
   local k
   for k in "${unset_keys[@]:+"${unset_keys[@]}"}"; do
     case "$k" in
-      local_host|remote_tmp|cloud_dir|keep_backups) ;;
+      local_host|remote_tmp|cloud_dir|cloud_folder) ;;
       ssh|wp_root) die "Refusing to unset required key '$k'." ;;
       "") die "--unset needs a key name." ;;
-      *) die "Cannot unset unknown key '$k' (local_host|remote_tmp|cloud_dir|keep_backups)." ;;
+      *) die "Cannot unset unknown key '$k' (local_host|remote_tmp|cloud_dir|cloud_folder)." ;;
     esac
     if [ -n "$(client_get "$name" "$k")" ]; then
       client_unset "$name" "$k"; log_ok "  unset $k"; changed=1

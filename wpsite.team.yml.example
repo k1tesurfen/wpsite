@@ -1,0 +1,58 @@
+# wpsite TEAM configuration — the SHARED client definitions.
+#
+# Put this file in a mounted Google Drive shared drive so the whole team works from
+# one source of truth, then point each colleague's LOCAL config at it:
+#
+#   # in ~/.config/wpsite/wpsite.yml
+#   team_config: /Users/you/Library/CloudStorage/GoogleDrive-.../wpsite/wpsite.team.yml
+#
+# (or run `wpsite setup`, which writes the local config + installs your SSH key on
+# every client below).
+#
+# This file holds ONLY the `clients:` map. Do NOT add machine-specific settings here
+# (base_dir, cloud_base) or dev sites — those are per-user and live in each local
+# config. Manage entries with `wpsite client add/edit/remove` (they write here), not
+# by hand where possible.
+#
+# NOTE: sharing this file shares the client DEFINITIONS, not access. SSH keys are
+# per-person (in ~/.ssh) — each colleague still needs their key on each server, which
+# `wpsite setup` / `wpsite client add` install via ssh-copy-id.
+#
+# CAUTION: Google Drive has no file locking. If two people run `client add/edit`
+# simultaneously, Drive may create a "conflicted copy". Client edits are rare, so this
+# is low-risk, but coordinate large changes.
+
+clients:
+  acme:
+    ssh: ubuntu@acme-industrial.com   # ssh target (user@host) for the production server
+    wp_root: /var/www/acme.com        # absolute path to the WordPress install on that server
+    # Optional per-client overrides:
+    # remote_tmp: ~/.wpsite_tmp       # remote backup staging dir (default: /tmp).
+    #                                 # Set this (abs or ~/-relative, ABOVE the docroot)
+    #                                 # when the host's /tmp is small/quota-capped — e.g.
+    #                                 # entry-level shared hosting like Strato.
+    # local_host: acme.test           # local hostname (default: <client>.test)
+    # deactivate_plugins:             # extra plugin slugs to disable on the replica
+    #   - some-prod-only-plugin       # (caching/optimization plugins are disabled by default)
+    # review_pages:                   # extra pages to screenshot in `upgrade --review`
+    #   - /kontakt                    # (home + a few auto-picked pages are captured by default)
+    # review_dismiss:                 # extra CSS selectors to hide before each screenshot
+    #   - "#my-cookie-banner"         # (Usercentrics #usercentrics-root + CCM19 .ccm-root are hidden by default)
+    # cloud_folder: acme-final.de     # PORTABLE override of the project-folder NAME under
+    #                                 # cloud_base. Backups then go to
+    #                                 # <cloud_base>/acme-final.de/100_Backup. Set this when
+    #                                 # the site's backup domain is a staging/dev URL that
+    #                                 # doesn't match the curated Drive folder name. Prefer
+    #                                 # this over cloud_dir (a machine-specific absolute path
+    #                                 # that won't resolve for other colleagues).
+    #
+    # Backups always land in the fixed `100_Backup` subfolder of the project folder; no
+    # other folder in the domain folder is ever touched, and the folder must pre-exist.
+
+  baker:
+    ssh: root@bakery-shop.net
+    wp_root: /var/www/html
+
+  cafe:
+    ssh: cafe_admin@192.168.1.45
+    wp_root: /home/cafe/public_html

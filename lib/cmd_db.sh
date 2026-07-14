@@ -10,7 +10,7 @@
 # Credentials are the fixed replica creds (root/root) — safe: local-only replicas.
 #
 #   wpsite db <site>        open <site>'s DB in the default browser, logged in
-#   wpsite db up|down|status   manage the shared Adminer container
+#   wpsite db start|stop|status   manage the shared Adminer container
 
 WPSITE_ADMINER_CONTAINER="wpsite_adminer"
 WPSITE_ADMINER_IMAGE="${WPSITE_ADMINER_IMAGE:-wpsite/adminer}"
@@ -149,11 +149,11 @@ cmd_db() {
   [ $# -gt 0 ] && shift
   case "$sub" in
     "")   _db_open_last ;;
-    up)   require docker
+    start|up)  require docker
           _adminer_image_ensure || die "Could not build the Adminer image."
           _adminer_ensure
-          log_ok "Adminer up — http://localhost:$WPSITE_ADMINER_PORT (open a site with: wpsite db <site>)" ;;
-    down) require docker
+          log_ok "Adminer started — http://localhost:$WPSITE_ADMINER_PORT (open a site with: wpsite db <site>)" ;;
+    stop|down) require docker
           if docker rm -f "$WPSITE_ADMINER_CONTAINER" >/dev/null 2>&1; then
             log_ok "Adminer stopped."
           else

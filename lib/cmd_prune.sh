@@ -2,9 +2,11 @@
 # wpsite prune [<client>|--all] [<backup-id>] [--keep N] [--older-than Nd] [--dry-run] [--yes]
 #
 # Delete backups. Two forms:
-#   wpsite prune <client>            rolling retention: keep newest <keep_backups>
-#   wpsite prune --all               (default 4), skipping -permanent backups.
+#   wpsite prune <client>            rolling retention: keep newest 5 (fixed team
+#   wpsite prune --all               policy), skipping -permanent backups.
 #   wpsite prune <client> <id>       delete THAT backup — even if permanent.
+# --keep N / --older-than are explicit one-off overrides; they don't change the
+# standing 5-backup policy.
 #
 # The cloud is the source of truth, so prune deletes from local AND cloud (and the
 # sync manifest) together. Already-built/running replicas are unaffected — their
@@ -122,7 +124,7 @@ cmd_prune() {
     return
   fi
 
-  # Default policy: per-client rolling retention (keep_backups, default 4).
+  # Default policy: rolling retention (fixed team policy — newest 5 per client).
   local default_keep=0
   [ -z "$keep" ] && [ -z "$older_days" ] && default_keep=1
 
@@ -137,7 +139,7 @@ cmd_prune() {
   fi
 
   local policy=""
-  if [ "$default_keep" = 1 ]; then policy="keep newest per-client keep_backups (default 4)"
+  if [ "$default_keep" = 1 ]; then policy="keep newest $(config_keep_backups) (fixed policy)"
   else
     [ -n "$keep" ]       && policy="keep newest $keep"
     [ -n "$older_days" ] && policy="${policy:+$policy, }delete older than ${older_days}d"

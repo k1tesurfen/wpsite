@@ -220,14 +220,57 @@ _backup_one_client() { # client full_flag persist_flag
   return 0
 }
 
+# Keep the cloud mapping in sync with reality. A pinned cloud_folder covers the phase
+# where a site lives on *.wird.cool and its backups belong under the FINAL client-domain
+# folder. When the site later goes live (or rebrands) onto a DIFFERENT domain that has
+# its OWN LIVE_WEB folder, follow it automatically so nobody has to remember to re-pin.
+# Strictly gated — never guesses, never creates a folder, never writes for an unpinned
+# client (derivation already tracks a live site there):
+#   • only acts when clients.<c>.cloud_folder is already set;
+#   • only when this backup's live domain differs from that pin;
+#   • only when <cloud_base>/<new-domain> ALREADY exists as a project folder.
+# A detected domain with no folder (the normal under-construction state) is left alone.
+_backup_track_domain() { # client folder
+  local client="$1" folder="$2" meta domain cbase current
+  cbase="$(config_cloud_base)"; [ -n "$cbase" ] || return 0
+  [ -d "$cbase" ] || return 0                       # Drive not mounted → skip
+  current="$(client_get "$client" cloud_folder)"
+  [ -n "$current" ] || return 0                     # only auto-remap an existing pin
+  meta="$(client_backup_dir "$client")/$folder/meta.env"
+  [ -f "$meta" ] || return 0
+  domain="$(grep -m1 '^SOURCE_HOME=' "$meta" 2>/dev/null | cut -d= -f2- || true)"
+  domain="${domain#*://}"; domain="${domain%%/*}"; domain="${domain%%:*}"; domain="${domain#www.}"
+  [ -n "$domain" ] || return 0
+  [ "$domain" = "$current" ] && return 0            # already tracking it
+  [ -d "$cbase/$domain" ] || return 0               # new domain has no folder → leave the pin (still under construction)
+  # The site now lives on a domain with its own project folder — follow it. Guard the
+  # write so an unreachable team config can never abort the backup.
+  _client_file >/dev/null || return 0
+  client_set "$client" cloud_folder "$domain"
+  log_ok "  domain change detected → cloud_folder remapped: $current → $domain"
+  return 0
+}
+
 # Auto-push the just-made backup + enforce rolling retention. Cloud problems warn.
 _backup_post_cloud() { # client folder
-  local client="$1" folder="$2"
+  local client="$1" folder="$2" cdir cbase
+  _backup_track_domain "$client" "$folder"   # follow a real domain change before pushing
   if cloud_available "$client"; then
     if _cloud_push_one "$client" "$folder"; then log_ok "  ↑ cloud: $folder"
     else log_warn "  cloud push of $folder skipped/failed."; fi
     _backup_autoprune "$client"
-  elif [ -n "$(client_cloud_dir "$client")" ]; then
+    return 0
+  fi
+  cdir="$(client_cloud_dir "$client")"
+  [ -n "$cdir" ] || return 0   # cloud feature off, or no project folder derivable yet
+  cbase="$(config_cloud_base)"
+  if [ -n "$cbase" ] && [ -d "$cbase" ]; then
+    # Drive IS mounted but the project folder doesn't exist — typically a *.wird.cool
+    # site whose backups belong under the FINAL client-domain folder in LIVE_WEB.
+    log_warn "  cloud skipped — project folder not found in Drive:"
+    log_warn "    $(dirname "$cdir")"
+    log_warn "  Point it at the right LIVE_WEB folder: wpsite client edit $client --cloud-folder <name>"
+  else
     log_warn "  cloud not mounted — local only (run 'wpsite backup sync' when back online)."
   fi
   return 0
@@ -260,11 +303,14 @@ cmd_backup() {
     persist) shift; _cmd_backup_persist "$@"; return ;;
   esac
 
-  local all=0 full=0 persist=0 client=""
+  # Full (real media) is the DEFAULT; --light opts into placeholder media. --full is
+  # still accepted (now a no-op) so existing scripts/callers don't break.
+  local all=0 full=1 persist=0 client=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --all)     all=1; shift ;;
       --full)    full=1; shift ;;
+      --light)   full=0; shift ;;
       --persist) persist=1; shift ;;
       -*) die "Unknown flag: $1" ;;
       *) client="$1"; shift ;;

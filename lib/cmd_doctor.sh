@@ -42,11 +42,23 @@ cmd_doctor() {
   if [ -f "$WPSITE_CONFIG" ]; then
     log_ok "config present at $WPSITE_CONFIG"
     if have yq; then
+      # Team config (shared client definitions in Drive), when configured.
+      local team; team="$(_team_config_path)"
+      if [ -n "$team" ]; then
+        if [ -f "$team" ]; then
+          log_ok "team config reachable at $team"
+          # A Drive "conflicted copy" means two people wrote it at once — flag it.
+          local conflicts; conflicts="$(find "$(dirname "$team")" -maxdepth 1 -iname '*conflicted*' 2>/dev/null | grep -c . || true)"
+          [ "$conflicts" -gt 0 ] && log_warn "  $conflicts 'conflicted copy' file(s) next to it — resolve them (concurrent edits)"
+        else
+          log_warn "team config set but NOT reachable: $team (is Google Drive mounted?)"
+        fi
+      fi
       local n; n="$(config_clients 2>/dev/null | grep -c . || true)"
       log_info "  $n client(s) configured"
     fi
   else
-    log_warn "no config at $WPSITE_CONFIG (copy wpsite.yml.example to start)"
+    log_warn "no config at $WPSITE_CONFIG (run 'wpsite setup' or copy wpsite.yml.example)"
   fi
 
   # Multi-site (optional — replicas still work via /etc/hosts without it)

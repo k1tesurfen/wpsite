@@ -142,3 +142,67 @@ in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
   [ -d "$base/wpsite_acme_fresh" ]               # spared: too new
   [ -d "$base/keepme_19990101_000000" ]          # spared: not our prefix
 }
+
+# --- _backup_track_domain: auto-remap cloud_folder on a real domain change ---
+# Self-contained (needs common.sh + a writable config + fake cloud folders).
+
+_td_setup() {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  source "$REPO/lib/common.sh"
+  CB="$BATS_TEST_TMPDIR/cloud"; mkdir -p "$CB"
+  CFG="$BATS_TEST_TMPDIR/td.yml"
+  cat > "$CFG" <<YAML
+base_dir: $BATS_TEST_TMPDIR/root
+cloud_base: $CB
+clients:
+  acme:
+    ssh: u@h
+    wp_root: /v
+YAML
+  export WPSITE_CONFIG="$CFG"
+}
+
+# Write a backup meta.env for acme with the given SOURCE_HOME.
+_td_meta() { # folder domain-url
+  local d; d="$(client_backup_dir acme)/$1"; mkdir -p "$d"
+  printf 'SOURCE_HOME=%s\n' "$2" > "$d/meta.env"
+}
+
+@test "track_domain: pinned + site moved to a domain WITH a folder -> remaps" {
+  _td_setup
+  client_set acme cloud_folder old-domain.de
+  mkdir -p "$CB/new-domain.de"                 # the new domain's project folder exists
+  _td_meta 20260101_120000 https://www.new-domain.de/
+  _backup_track_domain acme 20260101_120000
+  run client_get acme cloud_folder
+  [ "$output" = "new-domain.de" ]
+}
+
+@test "track_domain: pinned + site still on *.wird.cool (no folder) -> keeps pin" {
+  _td_setup
+  client_set acme cloud_folder schatz-gruppe.de
+  _td_meta 20260101_120000 https://schatzgruppe-site.wird.cool/
+  _backup_track_domain acme 20260101_120000
+  run client_get acme cloud_folder
+  [ "$output" = "schatz-gruppe.de" ]           # unchanged (no wird.cool folder)
+}
+
+@test "track_domain: NOT pinned -> never writes cloud_folder (derivation handles live)" {
+  _td_setup
+  mkdir -p "$CB/live.de"
+  _td_meta 20260101_120000 https://live.de/
+  _backup_track_domain acme 20260101_120000
+  run client_get acme cloud_folder
+  [ -z "$output" ]                             # stays unset
+}
+
+@test "track_domain: pinned + domain already matches -> no-op" {
+  _td_setup
+  client_set acme cloud_folder live.de
+  mkdir -p "$CB/live.de"
+  _td_meta 20260101_120000 https://www.live.de/
+  run _backup_track_domain acme 20260101_120000
+  [ "$status" -eq 0 ]
+  run client_get acme cloud_folder
+  [ "$output" = "live.de" ]
+}

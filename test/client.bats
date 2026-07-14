@@ -23,6 +23,7 @@ EOF
 
   # Neutralise externals: dep checks, SSH key install, teardown, and the readiness test.
   require() { :; }
+  _ensure_ssh_key() { return 0; }
   _client_setup_ssh_key() { return 0; }
   cmd_test() { echo "TEST_RAN"; return 0; }   # marker so tests can assert it (didn't) run
   _compose_down() { :; }
@@ -94,7 +95,7 @@ EOF
 @test "client add: writes required + optional fields and verifies" {
   run cmd_client add newco --ssh u@newco --wp-root /var/www/newco \
     --local-host newco-dev.test --remote-tmp '~/.wpsite_tmp' \
-    --cloud-dir /drive/newco.com --keep-backups 6
+    --cloud-dir /drive/newco.com
   [ "$status" -eq 0 ]
   [[ "$output" == *"added and verified"* ]]
 
@@ -103,7 +104,6 @@ EOF
   run client_get newco local_host;    [ "$output" = "newco-dev.test" ]
   run client_get newco remote_tmp;    [ "$output" = "~/.wpsite_tmp" ]
   run client_get newco cloud_dir;     [ "$output" = "/drive/newco.com" ]
-  run client_get newco keep_backups;  [ "$output" = "6" ]
 }
 
 @test "client add: omitted optionals are not written" {

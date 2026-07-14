@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# wpsite proxy <up|down|status|install-dns> — the shared reverse proxy + wildcard
+# wpsite proxy <start|stop|status|install-dns> — the shared reverse proxy + wildcard
 # DNS that let every client replica run at once, each on its own <client>.test URL.
 #
 # Traefik routes via its FILE provider (not the Docker socket — that needs socket
@@ -64,8 +64,8 @@ cmd_proxy() {
   local sub="${1:-status}"
   [ $# -gt 0 ] && shift
   case "$sub" in
-    up)              _proxy_ensure; log_ok "Proxy is up on http://localhost (routes *.test)." ;;
-    down)            require docker
+    start|up)        _proxy_ensure; log_ok "Proxy started on http://localhost (routes *.test)." ;;
+    stop|down)       require docker
                      if docker rm -f "$WPSITE_PROXY_CONTAINER" >/dev/null 2>&1; then
                        log_ok "Proxy stopped."
                      else
@@ -73,7 +73,7 @@ cmd_proxy() {
                      fi ;;
     status)          _proxy_status ;;
     install-dns|dns) _proxy_install_dns ;;
-    *) die "Unknown: wpsite proxy $sub (expected up|down|status|install-dns)" ;;
+    *) die "Unknown: wpsite proxy $sub (expected start|stop|status|install-dns)" ;;
   esac
 }
 

@@ -130,6 +130,27 @@ cstrict() {
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
 }
 
+@test "_backup_track_domain: bare statement safe (no cloud_base / unpinned)" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  cstrict '_backup_track_domain acme 20260101_120000'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_client_check_cloud_folder: bare statement safe (no cloud_base + missing folder)" {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+    printf "base_dir: %s/root\ncloud_base: %s/cloud\n" "$TMP" "$TMP" > "$TMP/c.yml"
+    mkdir -p "$TMP/cloud"
+    export WPSITE_CONFIG="$TMP/c.yml"
+    source "$REPO/lib/common.sh"
+    source "$REPO/lib/cmd_new.sh"
+    source "$REPO/lib/cmd_client.sh"
+    _client_check_cloud_folder ""            # early return (empty)
+    _client_check_cloud_folder does-not-exist  # warn path, still returns 0
+    echo __REACHED__'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
 @test "_audit_log / _manifest_add / _manifest_remove: bare statements safe" {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   cstrict '_manifest_add acme 20260101_120000; _manifest_remove acme 20260101_120000; _audit_log acme push 20260101_120000'

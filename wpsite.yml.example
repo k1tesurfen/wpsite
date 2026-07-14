@@ -1,65 +1,53 @@
-# wpsite configuration — copy to ~/.config/wpsite/wpsite.yml
+# wpsite LOCAL configuration — copy to ~/.config/wpsite/wpsite.yml
 #
 #   mkdir -p ~/.config/wpsite
 #   cp wpsite.yml.example ~/.config/wpsite/wpsite.yml
+#
+# Or just run `wpsite setup`, which writes this file for you and installs your SSH
+# key on every client in the shared team config.
+#
+# wpsite splits its config into TWO layers:
+#   • this LOCAL file — machine-specific settings + YOUR dev sites (below)
+#   • a shared TEAM file in Google Drive — the `clients:` map, shared by the whole
+#     team (see wpsite.team.yml.example). This file points at it via `team_config:`.
+# The client definitions are NOT stored here; they live in the team file so every
+# colleague works from one source of truth.
 
-# Master root for all site data. A leading ~/ is expanded to your home directory.
-# SSH-backed clients live under <base_dir>/clients/<name>/ (backups + docker);
-# local-only dev sites live under <base_dir>/dev/<name>/. Both subfolders are
-# created automatically when a site is added.
+# Master root for all LOCAL site data. A leading ~/ is expanded to your home dir.
+# SSH-backed clients build under <base_dir>/clients/<name>/; local-only dev sites
+# under <base_dir>/dev/<name>/. Both subfolders are created automatically. This is
+# per-machine — do not share it.
 base_dir: ~/websites
 
-# Optional: cloud backup sync (a mounted Google Drive for Desktop folder = the
-# single source of truth; local is a fast cache). Leave unset to disable entirely.
-# A client's backups go to <cloud_base>/<production-domain>/ by default (domain is
-# read from the newest backup's metadata); override per client with cloud_dir.
-# cloud_base: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/clients
+# Path to the shared TEAM config (the file that holds `clients:`), typically inside
+# a mounted Google Drive shared drive. This is a per-user path — everyone's Drive
+# mount differs — so each colleague sets their own. Leave unset to keep clients in
+# THIS file instead (solo / pre-team mode).
+# team_config: /Users/you/Library/CloudStorage/GoogleDrive-you@example.com/Shared drives/.../wpsite/wpsite.team.yml
 
-# Rolling retention: after each backup, keep only the newest N non-permanent
-# backups (per client; -permanent backups are never auto-pruned). Default 4.
-# keep_backups: 4
+# Cloud backup sync: a mounted Google Drive folder = the single source of truth
+# (local is a fast cache). Per-machine, because the mount path embeds YOUR account.
+# A client's backups go to <cloud_base>/<production-domain>/100_Backup/ by default
+# (domain is read from the newest backup's metadata). wpsite writes ONLY into that
+# 100_Backup subfolder — the rest of the domain folder is the team's working folder
+# and is never touched, and a domain folder is never created (it must pre-exist).
+# Leave unset to disable cloud sync.
+# cloud_base: /Users/you/Library/CloudStorage/GoogleDrive-you@example.com/Shared drives/.../LIVE_WEB
+#
+# Retention is a FIXED team-wide policy: the newest 5 non-permanent backups per
+# client are kept (older ones auto-pruned locally + in the cloud). It is deliberately
+# NOT configurable. To keep a backup indefinitely, persist it (`wpsite backup --persist`
+# or `wpsite backup persist <client> <id>`), which exempts it from the rotation.
 
-# SSH-backed production clients. Hand-edit these, or let `wpsite client add` onboard
-# one for you (prompts for the fields below, runs ssh-copy-id, then `wpsite test`).
-clients:
-  acme:
-    ssh: ubuntu@acme-industrial.com   # ssh target (user@host) for the production server
-    wp_root: /var/www/acme.com        # absolute path to the WordPress install on that server
-    # Optional per-client overrides:
-    # remote_tmp: ~/.wpsite_tmp       # remote backup staging dir (default: /tmp).
-    #                                 # Set this (abs or ~/-relative, ABOVE the docroot)
-    #                                 # when the host's /tmp is small/quota-capped — e.g.
-    #                                 # entry-level shared hosting like Strato.
-    # local_host: acme.test           # local hostname (default: <client>.test)
-    # cloud_dir: ~/Library/CloudStorage/GoogleDrive-you@example.com/My Drive/clients/anthropic.com
-    #                                 # FULL path override for this client's cloud backups
-    #                                 # (use when the Drive folder is the FUTURE/final
-    #                                 # domain, not the one in the current backup).
-    # keep_backups: 6                 # per-client rolling-retention override (default: global/4)
-    # deactivate_plugins:             # extra plugin slugs to disable on the replica
-    #   - some-prod-only-plugin       # (caching/optimization plugins are disabled by default)
-    # review_pages:                   # extra pages to screenshot in `upgrade --review`
-    #   - /kontakt                    # (home + a few auto-picked pages are captured by default)
-    # review_dismiss:                 # extra CSS selectors to hide before each screenshot
-    #   - "#my-cookie-banner"         # (Usercentrics #usercentrics-root + CCM19 .ccm-root are hidden by default)
-
-  baker:
-    ssh: root@bakery-shop.net
-    wp_root: /var/www/html
-
-  cafe:
-    ssh: cafe_admin@192.168.1.45
-    wp_root: /home/cafe/public_html
-
-# Local-only dev sites. You normally don't hand-edit this — `wpsite new` and
-# `wpsite clone` add/remove entries here (and `wpsite destroy` removes a dev site).
-# Shown for reference:
+# Local-only dev sites (sandboxes with no SSH source). You normally don't hand-edit
+# this — `wpsite new` and `wpsite clone` add entries, `wpsite destroy` removes them.
+# These stay LOCAL (never propagated to the cloud/team). Shown for reference:
 # dev:
 #   myshop:
-#     host: myshop.test       # local hostname (default: <name>.test)
-#     wp_version: "6.7"        # blank/omitted = latest
+#     host: myshop.test          # local hostname (default: <name>.test)
+#     wp_version: "6.7"          # blank/omitted = latest
 #     php: "8.2"
-#   acme-staging:              # a clone of the `acme` client
+#   acme-staging:                # a clone of the `acme` client
 #     host: acme-staging.test
-#     source: acme             # the client it was cloned from
+#     source: acme               # the client it was cloned from
 #     backup: "20260626_101500"

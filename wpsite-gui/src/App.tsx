@@ -10,6 +10,7 @@ interface CommandDescription {
   cmd: string;
   description: string;
   destructive?: boolean;
+  terminal?: boolean;   // runs interactively in Terminal.app instead of the piped runner
 }
 
 function App() {
@@ -26,25 +27,26 @@ function App() {
 
   const terminalRef = useRef<HTMLPreElement>(null);
 
-  // Client commands configuration
+  // Kunden-Aktionen
   const clientCommands: CommandDescription[] = [
-    { name: "Build", cmd: "build", description: "Synthesizes Compose, sets up proxy routing, and starts container replica." },
-    { name: "Backup", cmd: "backup", description: "Saves a complete backup of DB, plugins, themes, and uploads as a compressed tarball." },
-    { name: "Test Remote", cmd: "test", description: "Verifies remote SSH, system commands (tar, php, mysql), folder paths, and WP-CLI database readiness." },
-    { name: "Start", cmd: "start", description: "Powers up the containerized replica container if it was stopped." },
-    { name: "Stop", cmd: "stop", description: "Gracefully powers down the replica container without losing any data." },
-    { name: "Upgrade", cmd: "upgrade", description: "Upgrades WordPress core, themes, and plugins with a review step." },
-    { name: "Apply Backup", cmd: "apply", description: "Extracts a client's backup over the current containerized replica (Destructive).", destructive: true },
-    { name: "Destroy", cmd: "destroy", description: "Completely removes container, volume, and proxy route (Destructive).", destructive: true },
+    { name: "Bauen", cmd: "build", description: "Erstellt die lokale Kopie aus der neuesten Sicherung, richtet das Proxy-Routing ein und startet sie unter http://<kunde>.test." },
+    { name: "Sicherung", cmd: "backup", description: "Lädt eine vollständige Sicherung (Datenbank, Plugins, Themes, Medien) vom Live-Server und legt sie lokal + in der Cloud ab." },
+    { name: "Server testen", cmd: "test", description: "Prüft die SSH-Verbindung, Server-Befehle (tar, php, mysql), Pfade und ob WP-CLI und die Datenbank bereit sind. Nur lesend – jederzeit sicher." },
+    { name: "Starten", cmd: "start", description: "Startet eine gestoppte lokale Kopie wieder. Die Daten bleiben erhalten." },
+    { name: "Stoppen", cmd: "stop", description: "Hält die laufende lokale Kopie an, ohne Daten zu verlieren – jederzeit wieder startbar." },
+    { name: "Aktualisieren", cmd: "upgrade", description: "Aktualisiert WordPress-Core, Themes und Plugins auf der lokalen Kopie – mit Screenshot-Vergleich vorher/nachher zur Kontrolle." },
+    { name: "Auf Produktion anwenden", cmd: "apply", description: "Führt das geprobte Update auf dem LIVE-Server des Kunden aus (macht vorher eine frische Sicherung). Unwiderruflich – vorher immer lokal mit „Aktualisieren“ testen!", destructive: true },
+    { name: "Entfernen", cmd: "destroy", description: "Entfernt die lokale Kopie vollständig – Container, Datenbank-Volume und Proxy-Route. Sicherungen bleiben erhalten.", destructive: true },
   ];
 
-  // Global commands configuration
+  // Globale Aktionen
   const globalCommands: CommandDescription[] = [
-    { name: "System Status", cmd: "status", description: "Lists running containers and general status of all client replicas." },
-    { name: "Stop All Replicas", cmd: "stop --all", description: "Gracefully stops all running client replicas at once." },
-    { name: "Doctor Check", cmd: "doctor", description: "Validates host dependencies, Docker daemon status, and local configs." },
-    { name: "Proxy Status", cmd: "proxy status", description: "Displays status of the shared Traefik reverse proxy and wildcard DNS." },
-    { name: "Mail Status", cmd: "mail status", description: "Displays status of the shared Mailpit container trapping replica emails." },
+    { name: "Einrichten", cmd: "setup", description: "Richtet diesen Rechner ein: lokale Konfiguration + SSH-Zugang zu allen Team-Kunden. Öffnet dafür das Terminal (fragt ggf. nach Passwörtern).", terminal: true },
+    { name: "Status", cmd: "status", description: "Zeigt alle laufenden lokalen Kopien und ihre Adressen." },
+    { name: "Alle stoppen", cmd: "stop --all", description: "Hält alle laufenden lokalen Kopien auf einmal an (Daten bleiben erhalten)." },
+    { name: "Systemcheck (Doctor)", cmd: "doctor", description: "Prüft Abhängigkeiten, den Docker-Dienst, die Team-Konfiguration und ob Google Drive erreichbar ist." },
+    { name: "Proxy-Status", cmd: "proxy status", description: "Zeigt den Status des gemeinsamen Traefik-Proxys und der *.test-DNS-Auflösung." },
+    { name: "Mail-Status", cmd: "mail status", description: "Zeigt den Status von Mailpit, das alle E-Mails der lokalen Kopien abfängt (Postfach unter localhost:8025)." },
   ];
 
   // Fetch clients from backend
@@ -98,6 +100,17 @@ function App() {
   const executeCommand = async (cmdDesc: CommandDescription) => {
     if (isRunning) return;
 
+    // Interactive commands (e.g. Einrichten) run in a real Terminal window.
+    if (cmdDesc.terminal) {
+      try {
+        await invoke("open_setup_terminal");
+        setLogs((prev) => prev + `\n[Terminal geöffnet: wpsite ${cmdDesc.cmd}]\n`);
+      } catch (err: any) {
+        setLogs((prev) => prev + `\n[Fehler]: Terminal konnte nicht geöffnet werden: ${err}\n`);
+      }
+      return;
+    }
+
     if (cmdDesc.destructive) {
       setConfirmOp(cmdDesc);
       setConfirmInput("");
@@ -111,7 +124,7 @@ function App() {
     if (!confirmOp || !selectedClient) return;
 
     if (confirmInput !== selectedClient) {
-      alert(`Confirmation failed. You must type "${selectedClient}" exactly.`);
+      alert(`Bestätigung fehlgeschlagen. Bitte „${selectedClient}“ genau so eingeben.`);
       return;
     }
 
@@ -127,7 +140,7 @@ function App() {
     try {
       await invoke("run_wpsite_command", { cmd, client: clientName });
     } catch (err: any) {
-      setLogs((prev) => prev + `\n[GUI Error]: Failed to start command: ${err}\n`);
+      setLogs((prev) => prev + `\n[GUI-Fehler]: Befehl konnte nicht gestartet werden: ${err}\n`);
       setIsRunning(false);
     }
   };
@@ -151,19 +164,19 @@ function App() {
         <div className="sidebar-header">
           <div className="app-brand">
             <span className="brand-dot"></span>
-            <h1 className="brand-title">wpsite GUI</h1>
+            <h1 className="brand-title">wpsite</h1>
           </div>
         </div>
 
         <nav className="sidebar-nav">
           <div className="nav-section">
             <div className="section-header">
-              <span>CLIENTS</span>
-              <button 
-                onClick={fetchClients} 
-                disabled={isRunning} 
-                className="refresh-btn" 
-                title="Refresh clients from config"
+              <span>KUNDEN</span>
+              <button
+                onClick={fetchClients}
+                disabled={isRunning}
+                className="refresh-btn"
+                title="Kundenliste neu laden"
               >
                 ⟳
               </button>
@@ -182,10 +195,10 @@ function App() {
                 </li>
               ))}
               {clients.length === 0 && !error && (
-                <li className="empty-state">No clients found in wpsite.yml</li>
+                <li className="empty-state">Keine Kunden gefunden – ist Google Drive verbunden?</li>
               )}
               {error && (
-                <li className="error-state" title={error}>Error loading config</li>
+                <li className="error-state" title={error}>Konfiguration konnte nicht geladen werden</li>
               )}
             </ul>
           </div>
@@ -200,7 +213,7 @@ function App() {
                   disabled={isRunning}
                 >
                   <span className="client-icon">⚙️</span>
-                  <span>Global Operations</span>
+                  <span>Globale Aktionen</span>
                 </button>
               </li>
             </ul>
@@ -213,12 +226,12 @@ function App() {
         <header className="content-header">
           <div className="header-info">
             <h2 className="current-title">
-              {activeTab === "client" ? `Client: ${selectedClient}` : "Global Operations"}
+              {activeTab === "client" ? `Kunde: ${selectedClient}` : "Globale Aktionen"}
             </h2>
             <p className="current-subtitle">
-              {activeTab === "client" 
-                ? `Manage local WordPress replica environment for ${selectedClient}` 
-                : "System-wide diagnostic, reverse proxy, and mail status actions"
+              {activeTab === "client"
+                ? `Lokale WordPress-Kopie für ${selectedClient} verwalten`
+                : "Einrichtung, Systemcheck, Proxy und Mail – für das ganze System"
               }
             </p>
           </div>
@@ -226,12 +239,12 @@ function App() {
             {isRunning ? (
               <div className="status-badge running">
                 <span className="spinner"></span>
-                Running Command
+                Befehl läuft
               </div>
             ) : (
               <div className="status-badge idle">
                 <span className="dot"></span>
-                System Ready
+                Bereit
               </div>
             )}
           </div>
@@ -242,16 +255,16 @@ function App() {
           {confirmOp ? (
             <div className="confirm-overlay">
               <div className="confirm-card">
-                <h3>⚠️ Critical Action Required</h3>
+                <h3>⚠️ Kritische Aktion</h3>
                 <p>
-                  You are about to execute a destructive command <strong>wpsite {confirmOp.cmd}</strong> on client <strong>{selectedClient}</strong>.
+                  Du bist dabei, den unwiderruflichen Befehl <strong>wpsite {confirmOp.cmd}</strong> für den Kunden <strong>{selectedClient}</strong> auszuführen.
                 </p>
                 <p className="confirm-desc">
                   {confirmOp.description}
                 </p>
                 <div className="confirm-form">
                   <label htmlFor="confirm-input">
-                    Please type <strong>{selectedClient}</strong> below to confirm:
+                    Zum Bestätigen bitte <strong>{selectedClient}</strong> eingeben:
                   </label>
                   <input
                     id="confirm-input"
@@ -263,14 +276,14 @@ function App() {
                   />
                   <div className="confirm-buttons">
                     <button className="btn-cancel" onClick={() => setConfirmOp(null)}>
-                      Cancel
+                      Abbrechen
                     </button>
-                    <button 
-                      className="btn-danger" 
+                    <button
+                      className="btn-danger"
                       onClick={handleConfirmDestructive}
                       disabled={confirmInput !== selectedClient}
                     >
-                      Confirm and Run
+                      Bestätigen und ausführen
                     </button>
                   </div>
                 </div>
@@ -299,20 +312,20 @@ function App() {
         {/* Dark-themed Monospace Terminal Emulator Panel */}
         <section className="terminal-section">
           <div className="terminal-header">
-            <span className="terminal-title">CONSOLE OUTPUT</span>
+            <span className="terminal-title">KONSOLENAUSGABE</span>
             <div className="terminal-actions">
-              <button 
-                onClick={() => setLogs("")} 
+              <button
+                onClick={() => setLogs("")}
                 className="btn-clear-logs"
-                title="Clear terminal window"
+                title="Konsole leeren"
               >
-                Clear Log
+                Leeren
               </button>
             </div>
           </div>
           <div className="terminal-body">
             <pre ref={terminalRef} className="terminal-pre">
-              {logs || "Console is empty. Run a command from above to view output..."}
+              {logs || "Die Konsole ist leer. Führe oben einen Befehl aus, um die Ausgabe zu sehen …"}
             </pre>
           </div>
         </section>
