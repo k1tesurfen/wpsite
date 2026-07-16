@@ -34,6 +34,9 @@ Before beginning, ensure you have the following installed on your macOS system:
 5.  **wpsite CLI**
     The GUI requires the underlying `wpsite` CLI tool to be installed and accessible in your system's `PATH`. Ensure you have completed the `wpsite` base installation (e.g., `wpsite doctor` passes).
 
+6.  **mandos CLI**
+    Client onboarding and machine setup are handled by the internal `mandos` CLI, which `wpsite` shells out to for the shared client registry, SSH-key onboarding, and Google Drive paths. Install it (`make install` in the `mandos` repo) and configure this machine once with `mandos config init`. The GUI does **not** create or edit clients: add a new client with `mandos client add`, then use the sidebar refresh button (⟳) to reload the list.
+
 ## Running in Development Mode
 
 Development mode provides hot-reloading for the React frontend and fast recompilation for the Rust backend.

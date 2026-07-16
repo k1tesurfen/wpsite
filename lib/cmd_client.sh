@@ -66,71 +66,17 @@ _client_check_cloud_folder() { # folder
   return 0
 }
 
-# Return the local PUBLIC key path to append. With an identity arg, use it (adding
-# .pub if needed); otherwise probe the common default key names. Non-zero if none.
-_client_find_pubkey() { # [identity]
-  local identity="${1:-}" p k
-  if [ -n "$identity" ]; then
-    case "$identity" in *.pub) p="$identity" ;; *) p="$identity.pub" ;; esac
-    [ -f "$p" ] && { printf '%s' "$p"; return 0; }
-    return 1
-  fi
-  for k in id_ed25519 id_rsa id_ecdsa; do
-    if [ -f "$HOME/.ssh/$k.pub" ]; then printf '%s' "$HOME/.ssh/$k.pub"; return 0; fi
-  done
-  return 1
-}
-
-# Make sure the user has a personal SSH key, generating one if not (a fresh Mac has
-# none). ed25519, into the standard ~/.ssh/id_ed25519. ssh-keygen prompts for a
-# passphrase — pressing Enter twice makes a passphrase-free key (simplest); setting one
-# is more secure. Returns non-zero (with guidance) only if ssh-keygen is unavailable.
-_ensure_ssh_key() {
-  _client_find_pubkey >/dev/null 2>&1 && return 0    # already have a usable key
-  if ! have ssh-keygen; then
-    log_warn "No SSH key found and ssh-keygen is unavailable — create one, then re-run:"
-    log_warn "  ssh-keygen -t ed25519"
-    return 1
-  fi
-  log_info "No SSH key found — creating one now at ~/.ssh/id_ed25519."
-  log_info "  When asked for a passphrase: press Enter twice for none (simplest), or type"
-  log_info "  one for extra security (macOS can remember it in your Keychain)."
-  mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
-  ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -C "wpsite-$(id -un)@$(hostname -s 2>/dev/null || hostname)"
-}
-
-# Ensure key-based SSH auth to <target> works. Probe first (accept-new so a
-# first-contact host key doesn't block the batch probe); if it already works, skip.
-# Otherwise install the key via ssh-copy-id, or a manual append fallback on macOS
-# (which ships no ssh-copy-id). Returns non-zero on failure — caller warns.
-_client_setup_ssh_key() { # target [identity]
-  local target="$1" identity="${2:-}"
-  if ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
-       "$target" true 2>/dev/null; then
-    log_ok "  Key-based SSH already works — skipping ssh-copy-id."
-    return 0
-  fi
-
-  log_info "  Installing your public key on $target (you may be prompted for the remote password)..."
+# Install the user's SSH key on a client's server — delegated to mandos, which owns
+# key onboarding: it probes (BatchMode) and skips if access already works, else runs
+# ssh-copy-id (or a manual authorized_keys append on macOS), and generates a local
+# ed25519 key first if you have none. Takes the CLIENT NAME (mandos resolves the
+# current ssh target from the registry). Returns non-zero on failure — callers warn.
+_client_setup_ssh_key() { # name [identity]
+  local name="$1" identity="${2:-}"
   local -a idopt=()
-  [ -n "$identity" ] && idopt=(-i "$identity")
-
-  if have ssh-copy-id; then
-    # "${idopt[@]:+...}" so an EMPTY array doesn't trip `set -u` on macOS's bash 3.2.
-    ssh-copy-id -o StrictHostKeyChecking=accept-new "${idopt[@]:+"${idopt[@]}"}" "$target"
-    return $?
-  fi
-
-  # macOS ships no ssh-copy-id → equivalent manual append over ssh.
-  log_warn "  ssh-copy-id not found; appending the key manually ('brew install openssh' to get it)."
-  local pub
-  if ! pub="$(_client_find_pubkey "$identity")"; then
-    log_error "  No local SSH public key found. Create one with: ssh-keygen -t ed25519"
-    return 1
-  fi
-  log_info "  Using public key: $pub"
-  ssh -o StrictHostKeyChecking=accept-new "$target" \
-    'umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys' < "$pub"
+  [ -n "$identity" ] && idopt=(--identity "$identity")
+  # "${idopt[@]:+...}" so an EMPTY array doesn't trip `set -u` on macOS's bash 3.2.
+  "$MANDOS_BIN" client setup-key "$name" "${idopt[@]:+"${idopt[@]}"}"
 }
 
 _client_add() {
@@ -240,15 +186,14 @@ _client_add() {
 
   echo
   if [ "$do_copyid" = 1 ]; then
-    log_info "Setting up key-based SSH access..."
-    [ -n "$key" ] || _ensure_ssh_key || true   # make sure a default key exists first
-    if _client_setup_ssh_key "$ssh_target" "$key"; then
+    log_info "Setting up key-based SSH access via mandos..."
+    if _client_setup_ssh_key "$name" "$key"; then
       log_ok "  SSH key access ready."
     else
       log_warn "  Could not set up the SSH key automatically — fix access, then: wpsite test $name"
     fi
   else
-    log_info "Skipping ssh-copy-id (--no-copy-id)."
+    log_info "Skipping SSH key setup (--no-copy-id)."
   fi
 
   if [ "$do_test" = 1 ]; then
@@ -367,8 +312,8 @@ _client_edit() {
 
   # Re-establish key access for a new target if asked.
   if [ "$do_copyid" = 1 ]; then
-    log_info "Setting up key-based SSH access for the current target..."
-    _client_setup_ssh_key "$(client_get "$name" ssh)" "$key" \
+    log_info "Setting up key-based SSH access via mandos..."
+    _client_setup_ssh_key "$name" "$key" \
       || log_warn "  Key setup failed — fix access, then: wpsite test $name"
   fi
 

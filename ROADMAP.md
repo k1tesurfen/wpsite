@@ -7,7 +7,8 @@ core/plugin/theme upgrades on the replica and applies the validated result to
 production in place.
 
 ```
-wpsite client add|edit|remove <name>       # manage clients (add wizard: ssh-copy-id + test)
+mandos config init  ·  mandos client add|setup-key         # clients + SSH keys live in mandos now
+wpsite client add|edit|remove <name>       # thin wrappers that write through mandos
 wpsite backup  <client> [--full] [--all]   # remote → local artifacts
 wpsite build   <client>                    # artifacts → running Docker replica
 wpsite start | stop | destroy <client>     # lifecycle of a built replica
@@ -134,13 +135,18 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
   (the Drive mount is a filesystem path). See CLAUDE.md "Cloud backup sync".
 - Consistent `log_info/ok/warn/error/debug` + `die`; `--verbose`.
 - `install.sh` symlink installer. (Homebrew formula skipped by choice.)
-- **`wpsite client add|edit|remove` — ✅ done.** Client lifecycle in the config.
-  **add:** onboarding wizard — prompts name/ssh/wp_root (+ cloud_dir when cloud sync is
-  on, since its default can't be derived before the first backup, + gated advanced
-  overrides), writes the entry via `client_set` (`yq -i`, comment-preserving, appended at
-  the end of `clients:`), installs the SSH key (`ssh-copy-id`, with a manual
-  `authorized_keys` fallback since macOS ships none), then runs `wpsite test` — a failed
-  test only warns and keeps the entry. **edit:** interactive (Enter keeps each current
+- **Client identity / SSH keys / Google Drive → moved to `mandos`. ✅** A separate internal
+  Go CLI (`~/git/mandos`) now owns the shared `clients:` registry, SSH-key onboarding, and
+  cloud paths; wpsite shells out to it (`MANDOS_BIN`). wpsite's own config now holds only
+  `base_dir` + `dev:`. The `wpsite client`/`setup` commands and the GUI were updated
+  accordingly (GUI dropped client-management + setup buttons); `cmd_setup` is pending a final
+  rework. See CLAUDE.md "Client registry … OWNED BY MANDOS".
+- **`wpsite client add|edit|remove` — ✅ done** (now thin wrappers over the mandos registry).
+  **add:** onboarding wizard — prompts name/ssh/wp_root (+ cloud_folder when cloud sync is
+  on, + gated advanced overrides), writes the entry via `client_set` (→ **mandos**,
+  comment-preserving), installs the SSH key via `mandos client setup-key` (probe →
+  `ssh-copy-id` → manual `authorized_keys` append on macOS; generates a local key if none),
+  then runs `wpsite test` — a failed test only warns and keeps the entry. **edit:** interactive (Enter keeps each current
   value) or flag-driven field changes, `--unset` for optionals, re-tests only when
   ssh/wp_root changed; rename intentionally unsupported. **remove:** tears down the
   replica + drops the config entry, keeps local backups unless `--purge`, never touches

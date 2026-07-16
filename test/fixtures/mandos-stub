@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Test stand-in for the `mandos` CLI. wpsite's client-registry / cloud / config
+# helpers shell out to `mandos` (via MANDOS_BIN); in tests we point MANDOS_BIN here so
+# the suite is self-contained (no real mandos install, no touching the real Drive
+# registry). It serves the registry + cloud_base from a YAML file — MANDOS_STUB_CONFIG,
+# defaulting to WPSITE_CONFIG — using yq, and implements ONLY the subcommands wpsite
+# calls. Keep in sync with the mandos adapters in lib/common.sh.
+set -u
+cfg="${MANDOS_STUB_CONFIG:-${WPSITE_CONFIG:-}}"
+
+# shellcheck disable=SC2088  # "~/" here is a case PATTERN, not an attempt to expand it.
+_untilde() { case "$1" in "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;; *) printf '%s\n' "$1" ;; esac; }
+
+group="${1:-}"; shift 2>/dev/null || true
+case "$group" in
+  client)
+    sub="${1:-}"; shift 2>/dev/null || true
+    case "$sub" in
+      list)  yq -r '(.clients // {}) | keys | .[]' "$cfg" 2>/dev/null || true ;;
+      has)   yq -e ".clients.\"${1:-}\"" "$cfg" >/dev/null 2>&1 ;;
+      get)   yq -r "(.clients.\"${1:-}\".\"${2:-}\") // \"\"" "$cfg" 2>/dev/null || true ;;
+      set)   yq -i ".clients.\"${1:-}\".\"${2:-}\" = \"${3:-}\"" "$cfg" ;;
+      unset) yq -i "del(.clients.\"${1:-}\".\"${2:-}\")" "$cfg" ;;
+      remove)
+             # Mirror real mandos: error on a missing client (wpsite's config_remove_client
+             # swallows it with `|| true`, matching the old yq-del no-op semantics).
+             yq -e ".clients.\"${1:-}\"" "$cfg" >/dev/null 2>&1 \
+               || { echo "mandos: client \"${1:-}\" not found" >&2; exit 1; }
+             yq -i "del(.clients.\"${1:-}\")" "$cfg" ;;
+      setup-key) printf '%s\n' "${1:-}" >> "${MANDOS_STUB_KEYLOG:-/dev/null}" ;;
+      *) echo "stub mandos: unknown client subcommand: $sub" >&2; exit 2 ;;
+    esac
+    ;;
+  cloud)
+    case "${1:-}" in
+      base) _untilde "$(yq -r '.cloud_base // ""' "$cfg" 2>/dev/null || true)" ;;
+      *) echo "stub mandos: unknown cloud subcommand: ${1:-}" >&2; exit 2 ;;
+    esac
+    ;;
+  config)
+    case "${1:-}" in
+      get)
+        case "${2:-}" in
+          team-config) printf '%s\n' "$cfg" ;;
+          cloud-base)  _untilde "$(yq -r '.cloud_base // ""' "$cfg" 2>/dev/null || true)" ;;
+          local)       printf '%s\n' "$cfg" ;;
+          *) echo "stub mandos: unknown config key: ${2:-}" >&2; exit 2 ;;
+        esac ;;
+      init)
+        # Records the invocation for assertions; the stub's registry is fixed via
+        # MANDOS_STUB_CONFIG, so init doesn't need to actually write anything.
+        printf 'config %s\n' "$*" >> "${MANDOS_STUB_INITLOG:-/dev/null}" ;;
+      *) echo "stub mandos: unknown config subcommand: ${1:-}" >&2; exit 2 ;;
+    esac
+    ;;
+  *) echo "stub mandos: unknown command: $group" >&2; exit 2 ;;
+esac

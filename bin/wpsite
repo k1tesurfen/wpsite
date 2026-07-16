@@ -73,6 +73,8 @@ Commands:
           --all           the fixed policy; skips -permanent). Flags: --keep N,
           <id>            --older-than Nd, --dry-run, --yes. Give a <backup-id> to
                           delete just that one (even if permanent).
+  prefetch            Warm caches for OFFLINE use: pull core Docker images
+                      (WordPress/MariaDB/proxy/mail) + cache the wp-cli phar
   proxy   <action>    Shared reverse proxy + wildcard DNS for running all replicas
                       at once: start | stop | status | install-dns
   mail    <action>    Shared Mailpit that traps all replica email: start | stop | status
@@ -81,6 +83,8 @@ Commands:
                       Manage the container with start | stop | status
   list    [site]      List clients + backups + dev sites (or one site's detail)
           --names         …just client names, one per line (machine-readable)
+          --dev-names     …just dev-site names, one per line (machine-readable)
+          --backups <c>   …complete backup ids for a client, newest first (machine-readable)
   status              Show running replicas + dev sites and their URLs
   doctor              Verify dependencies and environment
   test    <client>    Verify remote host connection, directories, and CLI/DB readiness
@@ -123,6 +127,7 @@ main() {
     apply)   cmd_apply "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
+    prefetch) cmd_prefetch "$@" ;;
     proxy)   cmd_proxy "$@" ;;
     mail)    cmd_mail "$@" ;;
     db)      cmd_db "$@" ;;

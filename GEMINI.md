@@ -9,7 +9,8 @@ Instructional context and architecture guide for the `wpsite` project.
 `wpsite` is a Bash-based CLI tool designed to backup WordPress sites over SSH and rebuild near-perfect local replicas under Docker (optimized for macOS + Homebrew). 
 
 ### Main Concepts & Architecture
-* **Low-Overhead Replica Storage**: To minimize disk and bandwidth usage, media uploads are not copied by default (`--full` option exists to override this). Instead, image and video dimensions are fetched from production and layout-accurate blank placeholders are procedurally generated locally using ImageMagick and `ffmpeg`.
+* **Depends on `mandos`**: A separate internal Go CLI (`~/git/mandos`) owns **client identity** (the shared `clients:` registry on Google Drive), **SSH-key onboarding**, and **Google Drive paths**. `wpsite` shells out to it (`MANDOS_BIN`, default `mandos`) and no longer stores clients or `cloud_base` itself. Configure a machine once with `mandos config init`.
+* **Low-Overhead Replica Storage**: Media uploads default to the real files. Pass `--light` to instead fetch only image/video dimensions from production and procedurally generate layout-accurate blank placeholders locally (ImageMagick + `ffmpeg`). (`--full` is accepted as a no-op for back-compat.)
 * **Centralized Reverse Proxy**: Replicas run simultaneously on dedicated local domains (e.g., `http://<client>.test`) mapped through a shared Traefik reverse proxy. No per-replica port collisions.
 * **Wildcard DNS**: Avoids per-build `sudo` hosts file modifications by optionally routing `*.test` to `127.0.0.1` locally via `dnsmasq`.
 * **Production Sandbox**:
@@ -65,6 +66,14 @@ To uninstall:
 ./install.sh --uninstall
 ```
 
+### Client Identity & Google Drive (`mandos`)
+Client definitions, SSH-key onboarding, and the Google Drive backup root are owned by the internal `mandos` CLI. Install it from `~/git/mandos` (`make install` → `/usr/local/bin/mandos`), then onboard this machine with the single wpsite command:
+```bash
+wpsite setup   # writes base_dir, runs `mandos config init` (points mandos at the shared
+               # registry + Drive root), and installs your SSH key on every client
+```
+It prompts for the `base_dir`, the shared registry path, and the Drive root (drag-and-drop in Terminal). Under the hood only `base_dir` goes in the wpsite config; the registry path + `cloud_base` go to mandos. You can also drive mandos directly: `mandos config init --team-config <file> --cloud-base <dir>` and `mandos client setup-key <name>`.
+
 ### Dependency Verification
 `wpsite` requires several system packages. Check status using:
 ```bash
@@ -108,24 +117,38 @@ The project uses strict Shellcheck linting and the `bats` framework for automate
   ```bash
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"
   ```
+* **Mandos Stub**: the client-registry / cloud / SSH-key helpers shell out to `mandos`; tests point `MANDOS_BIN` at `test/fixtures/mandos-stub` (which serves the fixture's `clients:`/`cloud_base:` via yq) so they never hit the real `mandos` or the real Drive registry.
 * **Feature Completeness**: Any new CLI option, utility helper, or config parse path must be accompanied by a dedicated test case in `test/`.
 
 ---
 
 ## 5. Configuration Schema
 
-Config lives at `~/.config/wpsite/wpsite.yml`. Example:
+Config is split across two tools.
+
+**wpsite** — `~/.config/wpsite/wpsite.yml` holds only machine-local settings: `base_dir`
+and your `dev:` sites. Clients and `cloud_base` are **not** here anymore.
 
 ```yaml
 base_dir: ~/websites            # Root working directory where local backups & docker folders reside
+# dev: sites are managed by `wpsite new` / `wpsite clone`
+```
+
+**mandos** — `~/.config/mandos/mandos.yml` (set via `mandos config init`) points at the
+shared **client registry** (the `clients:` map, a YAML on mounted Google Drive) and the
+Drive `cloud_base` root. A client entry looks like:
+
+```yaml
 clients:
   acme:
     ssh: ubuntu@acme-industrial.com
     wp_root: /var/www/acme.com
-    # Optional local hostname override (defaults to <client>.test)
-    local_host: acme.test
+    # local_host: acme.test   # optional (defaults to <client>.test)
 ```
-* Read values using the `client_get` helper in `lib/common.sh`:
+
+* wpsite reads client values through `common.sh` helpers, which shell out to `mandos`:
   ```bash
-  client_get "acme" "ssh"
+  client_get "acme" "ssh"     # -> mandos client get acme ssh
   ```
+* Manage clients with `mandos client add/set/unset/remove/setup-key` (or the `wpsite
+  client add/edit/remove` wrappers, which write through mandos).

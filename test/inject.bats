@@ -18,6 +18,7 @@ dev:
     host: myshop.test
 EOF
   export WPSITE_CONFIG="$CFG"
+  export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_build.sh"     # provides _ensure_wp_cli (used by --activate)
   source "$REPO/lib/cmd_inject.sh"

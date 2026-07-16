@@ -45,8 +45,14 @@ require() { # cmd [brew-package]
 
 WPSITE_CONFIG="${WPSITE_CONFIG:-$HOME/.config/wpsite/wpsite.yml}"
 
+# The mandos CLI owns the client registry, SSH access and Google Drive paths; wpsite
+# shells out to it (see the client-registry + cloud sections below). Override for tests
+# via MANDOS_BIN (point it at a stub).
+MANDOS_BIN="${MANDOS_BIN:-mandos}"
+
 config_require() {
   require yq
+  require "$MANDOS_BIN"
   [ -f "$WPSITE_CONFIG" ] || die "Config not found at $WPSITE_CONFIG (see wpsite.yml.example)"
 }
 
@@ -64,50 +70,26 @@ expand_tilde() {
 _yq() { yq -r "$1 // \"\"" "$WPSITE_CONFIG"; }
 
 # ---------------------------------------------------------------------------
-# Two-layer config: the LOCAL file ($WPSITE_CONFIG) holds machine-specific settings
-# (base_dir, cloud_base) + this user's dev sites; the shared TEAM file (in Google
-# Drive) holds the .clients map so a whole team shares one set of client definitions.
-# The local file points at the team file via `team_config:` (a per-user path, since
-# every Drive mount differs); WPSITE_TEAM_CONFIG overrides it (tests). When no team
-# file is configured, clients fall back to the local file — so a pre-split / solo
-# setup keeps working unchanged. Team is authoritative: clients are NEVER redefined
-# locally, so there is no merge/precedence logic.
+# Client registry — OWNED BY MANDOS.
+# wpsite no longer reads or writes the shared client YAML directly; it shells out to
+# the `mandos` CLI, which resolves the two-layer local/team config (the team file on
+# Google Drive is the source of truth), preserves comments on edits, and refuses
+# writes when Drive is unmounted. These helpers keep their original names/signatures
+# so the many callers across lib/ don't change.
 # ---------------------------------------------------------------------------
 
-# Resolved path of the shared team config, or empty when the feature isn't set up.
-_team_config_path() {
-  if [ -n "${WPSITE_TEAM_CONFIG:-}" ]; then printf '%s' "$WPSITE_TEAM_CONFIG"; return 0; fi
-  local p; p="$(yq -r '.team_config // ""' "$WPSITE_CONFIG" 2>/dev/null || true)"
-  [ -n "$p" ] && expand_tilde "$p"
-  return 0
-}
+# Resolved path of the shared client registry (mandos's team file), or empty when
+# mandos runs solo. Kept for doctor/setup/client status messages. (Legacy name.)
+_team_config_path() { "$MANDOS_BIN" config get team-config 2>/dev/null || true; }
 
-# The file that holds .clients, for READS. Prints the team file when configured and
-# present, else the local file (fallback). Returns non-zero (printing nothing) when a
-# team file IS configured but missing (Drive unmounted) — callers warn + degrade.
+# Reachability probe for the client registry: prints the registry file path and
+# returns 0 when reachable, non-zero when a team file is configured but missing
+# (Drive unmounted). Used to skip optional team-config writes. (Legacy name, now a shim.)
 _client_file() {
   local t; t="$(_team_config_path)"
-  if [ -z "$t" ]; then printf '%s' "$WPSITE_CONFIG"; return 0; fi
+  [ -n "$t" ] || { printf '%s' "$WPSITE_CONFIG"; return 0; }   # mandos solo → local file
   [ -f "$t" ] || return 1
   printf '%s' "$t"
-}
-
-# Like _client_file but for WRITES: a configured-but-missing team file is fatal (we
-# must never silently write a client into the local file where the team can't see it).
-_client_file_w() {
-  local t; t="$(_team_config_path)"
-  if [ -z "$t" ]; then printf '%s' "$WPSITE_CONFIG"; return 0; fi
-  [ -f "$t" ] || die "Team config not found at $t — is your Google Drive mounted? Client changes must write to the shared team config."
-  printf '%s' "$t"
-}
-
-# One-line warning (once per process) when the configured team file is unreachable.
-_WPSITE_TEAM_WARNED=""
-_warn_team_unreachable() {
-  [ -n "$_WPSITE_TEAM_WARNED" ] && return 0
-  _WPSITE_TEAM_WARNED=1
-  log_warn "Team config unreachable at $(_team_config_path) — is your Google Drive mounted? No clients are visible."
-  return 0
 }
 
 config_base_dir() {
@@ -116,43 +98,20 @@ config_base_dir() {
   expand_tilde "$d"
 }
 
-# All client read/write helpers below resolve their file through _client_file(_w) so
-# they act on the shared TEAM config when one is set, or the local file as a fallback.
-config_clients() {
-  local f; f="$(_client_file)" || { _warn_team_unreachable; return 0; }
-  yq -r '(.clients // {}) | keys | .[]' "$f"
-}
-
-config_has_client() {
-  local f; f="$(_client_file)" || return 1
-  yq -e ".clients.\"$1\"" "$f" >/dev/null 2>&1
-}
-
-# client_get <client> <key> — reads .clients.<client>.<key> (empty if unreachable).
-client_get() {
-  local f; f="$(_client_file)" || return 0
-  yq -r "(.clients.\"$1\".\"$2\") // \"\"" "$f"
-}
-
-# client_set <client> <key> <value> — in-place write to the team file (yq -i, NOT
-# eval/source; preserves comments). yq appends a brand-new client at the end of
-# .clients. Strings only — fine for ssh/wp_root/local_host/... (list fields hand-edited).
-client_set() { # client key value
-  local f; f="$(_client_file_w)"
-  yq -i ".clients.\"$1\".\"$2\" = \"$3\"" "$f"
-}
-
-# Remove a client's whole config entry (used by `client remove` / to roll back a failed add).
-config_remove_client() { local f; f="$(_client_file_w)"; yq -i "del(.clients.\"$1\")" "$f"; }
-
-# client_unset <client> <key> — delete one key under a client (used by `client edit --unset`).
-client_unset() { local f; f="$(_client_file_w)"; yq -i "del(.clients.\"$1\".\"$2\")" "$f"; }
+# Client registry helpers — thin adapters over `mandos client …`. The read helpers end
+# with `|| true` so a `set -e` script never aborts when the registry is unreachable
+# (mandos already explains why on stderr); they degrade to empty output instead.
+config_clients()       { "$MANDOS_BIN" client list || true; }
+config_has_client()    { "$MANDOS_BIN" client has "$1"; }
+client_get()           { "$MANDOS_BIN" client get "$1" "$2" 2>/dev/null || true; }
+client_set()           { "$MANDOS_BIN" client set "$1" "$2" "$3"; }
+config_remove_client() { "$MANDOS_BIN" client remove "$1" >/dev/null 2>&1 || true; }
+client_unset()         { "$MANDOS_BIN" client unset "$1" "$2"; }
 
 require_client() { # client_name
-  local c="$1" where
+  local c="$1"
   [ -n "$c" ] || die "No client specified."
-  where="$(_team_config_path)"; [ -n "$where" ] || where="$WPSITE_CONFIG"
-  config_has_client "$c" || die "Client '$c' not found in $where"
+  "$MANDOS_BIN" client has "$c" || die "Client '$c' not found (see: mandos client list)."
 }
 
 # ---------------------------------------------------------------------------
@@ -213,13 +172,11 @@ client_docker_dir() { printf '%s/docker' "$(client_base "$1")"; }
 # Cloud backup sync (mounted Google Drive folder = single source of truth)
 # ---------------------------------------------------------------------------
 
-# Global cloud root (the mounted Drive folder). Empty when the feature isn't
-# configured — every cloud operation then no-ops with a quiet skip.
-config_cloud_base() {
-  local d; d="$(_yq '.cloud_base')"
-  [ -n "$d" ] && expand_tilde "$d"
-  return 0
-}
+# Global cloud root — now owned by mandos (its local config's cloud_base). Empty when
+# unset; every cloud operation then no-ops with a quiet skip. The per-client backup
+# folder resolution below (client_cloud_dir) still lives in wpsite: it's derived from
+# wpsite's own backup metadata (_cloud_domain_from_meta).
+config_cloud_base() { "$MANDOS_BIN" cloud base 2>/dev/null || true; }
 
 # Rolling retention is a FIXED team-wide policy: keep the newest 5 non-permanent
 # backups per client. Deliberately NOT configurable — everyone prunes to the same

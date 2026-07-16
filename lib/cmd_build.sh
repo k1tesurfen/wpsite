@@ -3,6 +3,10 @@
 # Heavy/destructive: tears down any existing replica (incl. its DB volume) and
 # rebuilds from scratch. For pause/resume use `wpsite stop` / `wpsite start`.
 
+# The MariaDB image for replicas (also pulled by `wpsite prefetch`). One place, so the
+# compose file and prefetch can't drift.
+WPSITE_DB_IMAGE="mariadb:10.11"
+
 # Read a KEY=value from meta.env without sourcing it.
 _meta_get() { grep -m1 "^$1=" "$2" 2>/dev/null | cut -d= -f2- || true; }
 
@@ -203,18 +207,57 @@ _rebuild_media() { # media_map_file im_convert
   rm -rf "$tmpd"
 }
 
-# The official wordpress:*-apache image ships no wp-cli. Install the phar into the
-# running app container (it has PHP, a generated wp-config, DB access and WP core
-# — everything wp-cli needs). Fetched via PHP since curl/wget aren't guaranteed.
-# Returns non-zero if it couldn't be made available.
+# The official wordpress:*-apache image ships no wp-cli, and each build is a fresh
+# container — so wp-cli must be (re)installed every time. To keep builds working
+# OFFLINE, we cache the phar on the host (<base_dir>/.cache/wp-cli.phar): download it
+# once when online, then `docker cp` the cached copy into each container. Only when the
+# cache is empty do we fall back to an in-container PHP download (online-only).
+WPSITE_WP_CLI_URL="https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar"
+_wp_cli_cache() { printf '%s/.cache/wp-cli.phar' "$(config_base_dir)"; }
+
+# Populate the host wp-cli cache (idempotent; online-only via curl). Also used by
+# `wpsite prefetch`. Returns 0 iff the cache is present afterward.
+_wp_cli_cache_warm() {
+  local cache; cache="$(_wp_cli_cache)"
+  [ -s "$cache" ] && return 0
+  have curl || return 1
+  mkdir -p "$(dirname "$cache")"
+  if curl -fsSL "$WPSITE_WP_CLI_URL" -o "$cache.tmp.$$" 2>/dev/null && [ -s "$cache.tmp.$$" ]; then
+    mv -f "$cache.tmp.$$" "$cache"
+    return 0
+  fi
+  rm -f "$cache.tmp.$$"
+  return 1
+}
+
+# Returns non-zero if wp-cli couldn't be made available in the container.
 _ensure_wp_cli() { # app_container
   local app="$1"
   docker exec "$app" sh -c '[ -x /usr/local/bin/wp ]' >/dev/null 2>&1 && return 0
-  log_info "Installing wp-cli into $app..."
+
+  local cache; cache="$(_wp_cli_cache)"
+  _wp_cli_cache_warm || true   # best-effort; may be offline
+
+  # Offline-friendly path: copy the cached phar straight into the container.
+  if [ -s "$cache" ]; then
+    log_info "Installing wp-cli into $app (from cache)..."
+    if docker cp "$cache" "$app:/usr/local/bin/wp" >/dev/null 2>&1 \
+       && docker exec "$app" chmod +x /usr/local/bin/wp >/dev/null 2>&1; then
+      return 0
+    fi
+    log_warn "  Cached wp-cli copy failed — trying an in-container download."
+  fi
+
+  # Last resort (online only): fetch via PHP inside the container (curl/wget aren't
+  # guaranteed there), then seed the host cache for next time. URL must match above.
+  log_info "Installing wp-cli into $app (downloading)..."
   docker exec "$app" sh -c '
     php -r "copy(\"https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar\", \"/usr/local/bin/wp\");" &&
     chmod +x /usr/local/bin/wp
-  ' >/dev/null 2>&1
+  ' >/dev/null 2>&1 || return 1
+  mkdir -p "$(dirname "$cache")"
+  docker cp "$app:/usr/local/bin/wp" "$cache" >/dev/null 2>&1 || true
+  return 0
 }
 
 # Second mail-trap layer: the mu-plugin only routes wp_mail()/WP's PHPMailer. Any
@@ -526,7 +569,7 @@ $(printf '%s\n' "$ms_php" | sed 's/^/        /')"
   cat <<EOF
 services:
   db:
-    image: mariadb:10.11
+    image: $WPSITE_DB_IMAGE
     container_name: $db_c
     restart: unless-stopped
     environment:

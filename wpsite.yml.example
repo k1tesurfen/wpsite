@@ -3,15 +3,12 @@
 #   mkdir -p ~/.config/wpsite
 #   cp wpsite.yml.example ~/.config/wpsite/wpsite.yml
 #
-# Or just run `wpsite setup`, which writes this file for you and installs your SSH
-# key on every client in the shared team config.
-#
-# wpsite splits its config into TWO layers:
-#   • this LOCAL file — machine-specific settings + YOUR dev sites (below)
-#   • a shared TEAM file in Google Drive — the `clients:` map, shared by the whole
-#     team (see wpsite.team.yml.example). This file points at it via `team_config:`.
-# The client definitions are NOT stored here; they live in the team file so every
-# colleague works from one source of truth.
+# CLIENT MANAGEMENT + CLOUD NOW LIVE IN MANDOS.
+# The shared `clients:` registry, SSH access and the Google Drive root (cloud_base)
+# are owned by the `mandos` CLI — wpsite shells out to it. Configure those once with:
+#   mandos config init --team-config <…/mandos/mandos.team.yml> --cloud-base <…/LIVE_WEB>
+# so this LOCAL wpsite file only needs `base_dir` + your dev sites (below). The old
+# `team_config:` / `cloud_base:` keys here are ignored (safe to delete from your file).
 
 # Master root for all LOCAL site data. A leading ~/ is expanded to your home dir.
 # SSH-backed clients build under <base_dir>/clients/<name>/; local-only dev sites
@@ -19,21 +16,6 @@
 # per-machine — do not share it.
 base_dir: ~/websites
 
-# Path to the shared TEAM config (the file that holds `clients:`), typically inside
-# a mounted Google Drive shared drive. This is a per-user path — everyone's Drive
-# mount differs — so each colleague sets their own. Leave unset to keep clients in
-# THIS file instead (solo / pre-team mode).
-# team_config: /Users/you/Library/CloudStorage/GoogleDrive-you@example.com/Shared drives/.../wpsite/wpsite.team.yml
-
-# Cloud backup sync: a mounted Google Drive folder = the single source of truth
-# (local is a fast cache). Per-machine, because the mount path embeds YOUR account.
-# A client's backups go to <cloud_base>/<production-domain>/100_Backup/ by default
-# (domain is read from the newest backup's metadata). wpsite writes ONLY into that
-# 100_Backup subfolder — the rest of the domain folder is the team's working folder
-# and is never touched, and a domain folder is never created (it must pre-exist).
-# Leave unset to disable cloud sync.
-# cloud_base: /Users/you/Library/CloudStorage/GoogleDrive-you@example.com/Shared drives/.../LIVE_WEB
-#
 # Retention is a FIXED team-wide policy: the newest 5 non-permanent backups per
 # client are kept (older ones auto-pruned locally + in the cloud). It is deliberately
 # NOT configurable. To keep a backup indefinitely, persist it (`wpsite backup --persist`

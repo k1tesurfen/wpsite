@@ -5,6 +5,10 @@ setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"
+  # The client registry + cloud_base now come from `mandos`; in tests we point
+  # MANDOS_BIN at a stub that serves them from MANDOS_STUB_CONFIG (defaults to
+  # WPSITE_CONFIG — so the fixture's clients:/cloud_base: are served transparently).
+  export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
   source "$REPO/lib/common.sh"
 }
 
@@ -195,77 +199,9 @@ YAML
   [ "$status" -ne 0 ]
 }
 
-# --- two-layer config: clients from the team file, dev from local ----------
-
-# A writable local config (base_dir + dev + team_config pointer) and a separate
-# team file holding only .clients. WPSITE_TEAM_CONFIG overrides the pointer.
-_setup_layered() {
-  LOCAL="$BATS_TEST_TMPDIR/local.yml"
-  TEAM="$BATS_TEST_TMPDIR/team.yml"
-  cat > "$LOCAL" <<YAML
-base_dir: ~/wpsite-test-root
-dev:
-  myshop:
-    host: myshop.test
-YAML
-  cat > "$TEAM" <<YAML
-clients:
-  teamco:
-    ssh: u@teamco.example
-    wp_root: /var/www/teamco
-YAML
-  export WPSITE_CONFIG="$LOCAL" WPSITE_TEAM_CONFIG="$TEAM"
-}
-
-@test "team routing: clients come from the team file, dev from local" {
-  _setup_layered
-  run config_clients
-  [ "$output" = "teamco" ]
-  run client_get teamco ssh
-  [ "$output" = "u@teamco.example" ]
-  run config_dev_sites
-  [ "$output" = "myshop" ]
-}
-
-@test "team routing: client_set writes to the TEAM file, not local" {
-  _setup_layered
-  client_set teamco remote_tmp /tmp/x
-  run yq -r '.clients.teamco.remote_tmp' "$TEAM"
-  [ "$output" = "/tmp/x" ]
-  # local file must not have grown a clients map
-  run yq -e '.clients' "$LOCAL"
-  [ "$status" -ne 0 ]
-}
-
-@test "team routing: unreachable team file -> reads warn+empty, writes die" {
-  _setup_layered
-  export WPSITE_TEAM_CONFIG="$BATS_TEST_TMPDIR/gone.yml"
-  run config_clients
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"unreachable"* ]]
-  run config_has_client teamco
-  [ "$status" -ne 0 ]
-  run client_set teamco ssh u@h
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"Team config not found"* ]]
-}
-
-@test "no team_config -> clients fall back to the local file (solo mode)" {
-  LOCAL="$BATS_TEST_TMPDIR/solo.yml"
-  cat > "$LOCAL" <<YAML
-base_dir: ~/wpsite-test-root
-clients:
-  soloco:
-    ssh: u@solo
-    wp_root: /var/www/solo
-YAML
-  export WPSITE_CONFIG="$LOCAL"
-  unset WPSITE_TEAM_CONFIG
-  run config_clients
-  [ "$output" = "soloco" ]
-  run client_get soloco ssh
-  [ "$output" = "u@solo" ]
-}
+# NOTE: the two-layer local/team routing (team-file resolution, unreachable-Drive
+# degrade, solo fallback) moved OUT of wpsite into mandos, so those tests live with
+# mandos now. Here we only verify wpsite's adapters read/write via the mandos stub.
 
 @test "list --names: machine-readable client names, one per line" {
   source "$REPO/lib/cmd_list.sh"

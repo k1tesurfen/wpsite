@@ -17,13 +17,15 @@ clients:
     wp_root: /var/www/acme
 EOF
   export WPSITE_CONFIG="$CFG"
+  # The client registry goes through `mandos`; point MANDOS_BIN at the stub, which
+  # serves + mutates the registry in WPSITE_CONFIG (the temp CFG here).
+  export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_new.sh"      # provides the shared _prompt helper
   source "$REPO/lib/cmd_client.sh"
 
   # Neutralise externals: dep checks, SSH key install, teardown, and the readiness test.
   require() { :; }
-  _ensure_ssh_key() { return 0; }
   _client_setup_ssh_key() { return 0; }
   cmd_test() { echo "TEST_RAN"; return 0; }   # marker so tests can assert it (didn't) run
   _compose_down() { :; }
@@ -114,10 +116,9 @@ EOF
 }
 
 @test "client add: --no-copy-id skips the key install" {
-  # If ssh-copy-id were attempted the stub returns 0 anyway; assert the skip message.
   run cmd_client add newco --ssh u@newco --wp-root /var/www/newco --no-copy-id
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Skipping ssh-copy-id"* ]]
+  [[ "$output" == *"Skipping SSH key setup"* ]]
 }
 
 # --- add: keep-on-failure --------------------------------------------------
@@ -131,36 +132,22 @@ EOF
   [ "$output" = "u@failco" ]
 }
 
-# --- _client_find_pubkey ---------------------------------------------------
+# --- _client_setup_ssh_key (delegates to mandos) ---------------------------
+# Key onboarding (find/generate key, probe, ssh-copy-id/append) moved into mandos;
+# wpsite just calls `mandos client setup-key <name>`. So we verify the delegation +
+# the set -u array safety, not the local key mechanics (those are mandos's tests now).
 
-@test "_client_find_pubkey: default key, explicit identity, and none" {
-  home="$BATS_TEST_TMPDIR/h"; mkdir -p "$home/.ssh"; : > "$home/.ssh/id_ed25519.pub"
-  HOME="$home" run _client_find_pubkey
-  [ "$status" -eq 0 ]
-  [ "$output" = "$home/.ssh/id_ed25519.pub" ]
-
-  : > "$BATS_TEST_TMPDIR/mykey.pub"
-  run _client_find_pubkey "$BATS_TEST_TMPDIR/mykey"   # identity without .pub suffix
-  [ "$status" -eq 0 ]
-  [ "$output" = "$BATS_TEST_TMPDIR/mykey.pub" ]
-
-  HOME="$BATS_TEST_TMPDIR/empty" run _client_find_pubkey
-  [ "$status" -ne 0 ]
-}
-
-# --- _client_setup_ssh_key -------------------------------------------------
-
-@test "_client_setup_ssh_key: empty identity does not trip set -u (bash 3.2 array)" {
+@test "_client_setup_ssh_key: delegates to mandos by client NAME (empty identity is set -u safe)" {
+  local stub="$BATS_TEST_TMPDIR/m"
+  printf '#!/usr/bin/env bash\necho "CALLED: $*"\n' > "$stub"; chmod +x "$stub"
   # Regression: "${idopt[@]}" on an EMPTY array errors under `set -u` on macOS bash 3.2.
-  run env REPO="$REPO" bash -c 'set -euo pipefail
+  run env REPO="$REPO" STUB="$stub" bash -c 'set -euo pipefail
     source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_client.sh"
-    ssh() { return 1; }                    # probe fails -> fall through to ssh-copy-id
-    ssh-copy-id() { echo "copied: $*"; return 0; }
-    _client_setup_ssh_key u@host           # no identity -> idopt is empty
+    MANDOS_BIN="$STUB" _client_setup_ssh_key acme      # no identity -> idopt empty
     echo __REACHED__'
   [ "$status" -eq 0 ]
+  [[ "$output" == *"CALLED: client setup-key acme"* ]]
   [[ "$output" == *__REACHED__* ]]
-  [[ "$output" == *"copied:"* ]]
 }
 
 # --- edit ------------------------------------------------------------------
@@ -277,7 +264,8 @@ EOF
 
 # --- set -e regression guards for new bare-statement helpers ---------------
 
-strict() { run env REPO="$REPO" WPSITE_CONFIG="$WPSITE_CONFIG" bash -c "set -euo pipefail
+strict() { run env REPO="$REPO" WPSITE_CONFIG="$WPSITE_CONFIG" \
+  MANDOS_BIN="$REPO/test/fixtures/mandos-stub" bash -c "set -euo pipefail
 source \"\$REPO/lib/common.sh\"
 $1
 echo __REACHED__"; }

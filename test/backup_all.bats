@@ -6,6 +6,7 @@ setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"   # clients: acme, baker
+  export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_backup.sh"
   # neutralise everything that would touch the network/filesystem

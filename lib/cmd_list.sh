@@ -13,6 +13,26 @@ cmd_list() {
     config_clients
     return 0
   fi
+  # Porcelain: just the dev-site names (stdout, one per line). Dev sites are LOCAL
+  # (config_dev_sites reads the local config), so this never depends on Drive.
+  if [ "${1:-}" = "--dev-names" ]; then
+    config_dev_sites
+    return 0
+  fi
+  # Porcelain: COMPLETE backup ids for one client, newest first (used by the GUI clone
+  # picker so you can clone from an existing on-disk backup — no fresh backup / network).
+  if [ "${1:-}" = "--backups" ]; then
+    local bc="${2:-}" bdir d
+    { [ -n "$bc" ] && config_has_client "$bc"; } || return 0
+    bdir="$(client_backup_dir "$bc")"
+    [ -d "$bdir" ] || return 0
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      d="${d%/}"
+      if _is_complete_backup "$d"; then basename "$d"; fi
+    done < <(ls -td "$bdir"/*/ 2>/dev/null)
+    return 0
+  fi
   if [ -n "${1:-}" ]; then
     if config_has_dev "$1"; then
       _list_dev_site "$1"

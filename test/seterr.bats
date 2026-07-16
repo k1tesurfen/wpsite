@@ -108,7 +108,8 @@ echo __REACHED__"; }
 
 # Strict-mode runner with a minimal config + the cloud lib loaded.
 cstrict() {
-  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" \
+    MANDOS_BIN="$REPO/test/fixtures/mandos-stub" bash -c 'set -euo pipefail
     printf "base_dir: %s/root\nclients:\n  acme:\n    ssh: u@h\n    wp_root: /v\n" "$TMP" > "$TMP/c.yml"
     export WPSITE_CONFIG="$TMP/c.yml"
     source "$REPO/lib/common.sh"
@@ -138,7 +139,8 @@ cstrict() {
 
 @test "_client_check_cloud_folder: bare statement safe (no cloud_base + missing folder)" {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
-  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" \
+    MANDOS_BIN="$REPO/test/fixtures/mandos-stub" bash -c 'set -euo pipefail
     printf "base_dir: %s/root\ncloud_base: %s/cloud\n" "$TMP" "$TMP" > "$TMP/c.yml"
     mkdir -p "$TMP/cloud"
     export WPSITE_CONFIG="$TMP/c.yml"

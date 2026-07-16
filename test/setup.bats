@@ -1,18 +1,20 @@
 #!/usr/bin/env bats
-# `wpsite setup` — onboard a machine: write the local config + install SSH keys on
-# every client in the shared team config. yq is real (writes the config); ssh key
-# install + readiness test are stubbed (no network). Non-interactive throughout
-# (flags), so no TTY is needed.
+# `wpsite setup` — onboard a machine: write the wpsite local config (`base_dir` only),
+# point mandos at the shared registry (`mandos config init`), and install SSH keys on
+# every client. mandos is the stub (test/fixtures/mandos-stub): `config init` is recorded
+# to MANDOS_STUB_INITLOG, `client setup-key <name>` to MANDOS_STUB_KEYLOG, and the client
+# list is served from MANDOS_STUB_CONFIG (the TEAM file). Non-interactive throughout.
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
 
   BASE="$BATS_TEST_TMPDIR/root"
-  CFG="$BATS_TEST_TMPDIR/local.yml"          # local config: created by setup
-  TEAM="$BATS_TEST_TMPDIR/team.yml"          # shared client definitions
-  KEYLOG="$BATS_TEST_TMPDIR/keys.log"        # records _client_setup_ssh_key targets
-  : > "$KEYLOG"
+  CFG="$BATS_TEST_TMPDIR/local.yml"          # wpsite local config: created by setup
+  TEAM="$BATS_TEST_TMPDIR/team.yml"          # shared client registry (mandos team file)
+  KEYLOG="$BATS_TEST_TMPDIR/keys.log"        # stub records `client setup-key <name>` here
+  INITLOG="$BATS_TEST_TMPDIR/init.log"       # stub records `config init …` here
+  : > "$KEYLOG"; : > "$INITLOG"
   cat > "$TEAM" <<EOF
 clients:
   alpha:
@@ -24,54 +26,54 @@ clients:
 EOF
 
   export WPSITE_CONFIG="$CFG"
+  export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
+  export MANDOS_STUB_CONFIG="$TEAM"          # stub serves clients + config get from here
+  export MANDOS_STUB_KEYLOG="$KEYLOG" MANDOS_STUB_INITLOG="$INITLOG"
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_new.sh"       # _prompt
-  source "$REPO/lib/cmd_client.sh"    # _client_setup_ssh_key (overridden below)
+  source "$REPO/lib/cmd_client.sh"    # _client_setup_ssh_key (→ mandos client setup-key)
   source "$REPO/lib/cmd_setup.sh"
 
   require() { :; }
-  _ensure_ssh_key() { return 0; }   # don't run ssh-keygen in tests
-  _client_setup_ssh_key() { echo "$1" >> "$KEYLOG"; return 0; }
   cmd_test() { echo "TEST_RAN $1"; return 0; }
 }
 
-@test "setup: writes the local config (base_dir, cloud_base, team_config)" {
+@test "setup: writes only base_dir to the wpsite config, delegates the rest to mandos" {
   run cmd_setup --base-dir "$BASE" --cloud-base /drive/cloud --team-config "$TEAM"
   [ "$status" -eq 0 ]
-  run yq -r '.base_dir' "$CFG";     [ "$output" = "$BASE" ]
-  run yq -r '.cloud_base' "$CFG";   [ "$output" = "/drive/cloud" ]
-  run yq -r '.team_config' "$CFG";  [ "$output" = "$TEAM" ]
-  # clients are NOT copied into the local file
-  run yq -e '.clients' "$CFG"
-  [ "$status" -ne 0 ]
+  # wpsite config: base_dir only — NOT team_config / cloud_base (those are mandos's now).
+  run yq -r '.base_dir' "$CFG";  [ "$output" = "$BASE" ]
+  run yq -e '.team_config' "$CFG"; [ "$status" -ne 0 ]
+  run yq -e '.cloud_base' "$CFG";  [ "$status" -ne 0 ]
+  # mandos was configured via `config init` with the team file + cloud base.
+  run cat "$INITLOG"
+  [[ "$output" == *"--team-config $TEAM"* ]]
+  [[ "$output" == *"--cloud-base /drive/cloud"* ]]
 }
 
-@test "setup: installs the SSH key on every team client + runs test" {
+@test "setup: installs the SSH key on every client (via mandos) + runs test" {
   run cmd_setup --base-dir "$BASE" --team-config "$TEAM"
   [ "$status" -eq 0 ]
   run cat "$KEYLOG"
-  [[ "$output" == *"u@alpha"* ]]
-  [[ "$output" == *"u@bravo"* ]]
-  [[ "$output" == *"TEST_RAN alpha"* ]] || true   # test output is on the run above
+  [[ "$output" == *alpha* ]]
+  [[ "$output" == *bravo* ]]
   [ "$(grep -c . "$KEYLOG")" -eq 2 ]
 }
 
-@test "setup: --no-keys writes config but installs no keys" {
+@test "setup: --no-keys configures but installs no keys" {
   run cmd_setup --base-dir "$BASE" --team-config "$TEAM" --no-keys
   [ "$status" -eq 0 ]
   [ ! -s "$KEYLOG" ]
-  run yq -r '.team_config' "$CFG"; [ "$output" = "$TEAM" ]
+  run yq -r '.base_dir' "$CFG"; [ "$output" = "$BASE" ]
+  [ -s "$INITLOG" ]                     # mandos config init still ran
 }
 
-@test "setup: --keys-only skips config writing" {
-  # Pre-seed a local config pointing at the team file.
-  cat > "$CFG" <<EOF
-base_dir: $BASE
-team_config: $TEAM
-EOF
+@test "setup: --keys-only skips config writing + mandos init" {
+  printf 'base_dir: %s\n' "$BASE" > "$CFG"   # pre-existing wpsite config
   run cmd_setup --keys-only
   [ "$status" -eq 0 ]
   [ "$(grep -c . "$KEYLOG")" -eq 2 ]
+  [ ! -s "$INITLOG" ]                   # no `config init` on --keys-only
 }
 
 @test "setup: creates the local data layout (clients/ + dev/)" {
@@ -81,10 +83,11 @@ EOF
   [ -d "$BASE/dev" ]
 }
 
-@test "setup: missing team file -> warns, installs nothing, still exits 0" {
+@test "setup: registry unreachable -> warns, installs nothing, still exits 0" {
+  export MANDOS_STUB_CONFIG="$BATS_TEST_TMPDIR/gone.yml"   # team file doesn't exist
   run cmd_setup --base-dir "$BASE" --team-config "$BATS_TEST_TMPDIR/gone.yml"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Team config not found"* ]]
+  [[ "$output" == *"not found"* ]]
   [ ! -s "$KEYLOG" ]
 }
 

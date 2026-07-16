@@ -86,6 +86,7 @@ setup() {
 @test "cmd_review: errors clearly when there's no review yet" {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"
+  export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   run cmd_review acme
   [ "$status" -ne 0 ]
   [[ "$output" == *"No review found"* ]]

@@ -160,6 +160,7 @@ clients:
     wp_root: /v
 YAML
   export WPSITE_CONFIG="$CFG"
+  export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
 }
 
 # Write a backup meta.env for acme with the given SOURCE_HOME.

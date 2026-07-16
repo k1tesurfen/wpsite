@@ -12,7 +12,7 @@ placeholder images/videos.
 > **New team member / non-technical?** Follow the plain-language, click-by-click guide
 > instead — **[INSTALL.md](INSTALL.md)** (English) / **[INSTALL.de.md](INSTALL.de.md)**
 > (Deutsch). It covers Homebrew, Docker, copying wpsite from the shared Google Drive, and
-> `wpsite setup`. The steps below are the short technical version.
+> the one-time `mandos` config. The steps below are the short technical version.
 
 ```bash
 brew install yq imagemagick ffmpeg
@@ -23,21 +23,27 @@ git clone <this repo> && cd wpsite
                                   #   (WPSITE_BIN_DIR=~/.local/bin ./install.sh to change;
                                   #    ./install.sh --uninstall to remove)
 
-wpsite setup                      # writes the local config (base_dir, cloud_base,
-                                  #   team_config) + installs your SSH key on every
-                                  #   client in the shared team config
+# mandos owns client identity, SSH key onboarding, and Google Drive paths — install it too:
+cd ../mandos && make install      # builds & installs /usr/local/bin/mandos
+
+wpsite setup                      # one command: writes base_dir, points mandos at the
+                                  #   shared registry + Drive root (mandos config init),
+                                  #   and installs your SSH key on every client
 wpsite doctor                     # verify everything is ready
 ```
 
-Solo / no shared team config? Skip `setup` and hand-write the local config instead:
-`mkdir -p ~/.config/wpsite && cp wpsite.yml.example ~/.config/wpsite/wpsite.yml` (clients
-live in this file when `team_config:` is unset). See [Configuration](#configuration).
+Client identity/SSH access and the Drive `cloud_base` root now live in **mandos**
+(`~/.config/mandos/mandos.yml`); wpsite's own config holds only `base_dir` + your local
+`dev:` sites. See [Configuration](#configuration).
 
 ## Usage
 
 ```bash
-# Manage clients (SSH-backed production sites) in the config
-wpsite client add         # onboard a new client (wizard: prompts, ssh-copy-id, then a readiness test)
+# Manage clients (SSH-backed production sites) — mandos owns the shared client registry:
+mandos client add <name> --ssh <u@h> --wp-root <p>   # onboard a client + install your SSH key
+mandos client list        # list client names   (get/set/unset/remove/setup-key/has too)
+mandos client setup-key <c>   # (re)install your personal SSH key on a client's server
+# wpsite client add/edit/remove still work as thin wrappers that write through mandos:
 wpsite client edit <c>    # change a client's fields (interactive, or --ssh/--wp-root/--cloud-dir/…)
 wpsite client remove <c>  # remove a client + its replica (--purge also deletes its local backups)
 
@@ -84,21 +90,34 @@ remove the replica (or `client remove` to drop the client entirely).
 
 ## Configuration
 
-`~/.config/wpsite/wpsite.yml` (see [`wpsite.yml.example`](wpsite.yml.example)):
+Config is split across two tools:
+
+**wpsite** — `~/.config/wpsite/wpsite.yml` (see [`wpsite.yml.example`](wpsite.yml.example))
+holds only your machine-local settings: `base_dir` and your `dev:` sites.
 
 ```yaml
 base_dir: ~/websites
+# dev: sites are managed by `wpsite new`/`clone`
+```
+
+**mandos** — `~/.config/mandos/mandos.yml` owns the shared **client registry**
+(the `clients:` map, a YAML on mounted Google Drive), SSH key onboarding, and the
+Drive `cloud_base` root. Point wpsite at nothing here — it shells out to mandos.
+Set it up once with `mandos config init --team-config <shared-clients-yaml> --cloud-base <Drive-root>`.
+
+Add a client with `mandos client add <name> --ssh <u@h> --wp-root <p>` — it writes the
+shared registry entry and installs your SSH key (generating one if you have none).
+`mandos client setup-key <c>` re-installs your key later; `mandos client set/unset/remove`
+edit entries. `wpsite client add/edit/remove` remain as thin wrappers that write through
+mandos. A client entry looks like:
+
+```yaml
 clients:
   acme:
     ssh: ubuntu@acme-industrial.com
     wp_root: /var/www/acme.com
     # local_host: acme.test   # optional override (default <client>.test)
 ```
-
-The easiest way to add a client is `wpsite client add` — it prompts for these
-fields, installs your SSH key (`ssh-copy-id`), writes the entry, and runs a
-readiness test. Edit or drop entries later with `wpsite client edit`/`remove`.
-You can still hand-edit the file directly.
 
 Client backups and the Docker working tree live under `<base_dir>/clients/<client>/`;
 local-only dev sites live under `<base_dir>/dev/<name>/`.

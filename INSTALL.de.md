@@ -132,7 +132,9 @@ Dann **Docker einmal öffnen**, damit es die Einrichtung abschließen kann:
 
 ## Schritt 6 — Mit dem Team verbinden
 
-Das ist der wichtige Schritt. Einfügen:
+Der Kundenzugang wird von einem kleinen Hilfsprogramm namens **mandos** verwaltet. Falls es
+noch nicht auf deinem Mac ist, bitte Beren, es dir einzurichten (einmalig). Sobald es da ist,
+erledigt **ein Befehl** die ganze Einrichtung. Einfügen:
 
 ```bash
 wpsite setup
@@ -142,8 +144,8 @@ Es stellt ein paar Fragen. Genau das machst du bei jeder:
 
 1. **„Local data dir (base_dir)“** → einfach **Return** drücken (die Voreinstellung passt).
 
-2. **„Shared team config path…“** → Gehe im Finder zu **Google Drive → Geteilte Ablagen →
-   01_Projekte → 01_Global → wpsite** und finde die Datei **`wpsite.team.yml`**. **Zieh
+2. **„Shared client registry…“** → Gehe im Finder zu **Google Drive → Geteilte Ablagen →
+   01_Projekte → 01_Global → mandos** und finde die Datei **`mandos.team.yml`**. **Zieh
    diese Datei ins Terminal-Fenster** und drücke **Return**.
 
 3. **„Cloud backup root (cloud_base)…“** → Gehe im Finder zu **Google Drive → Geteilte
@@ -158,9 +160,9 @@ Es stellt ein paar Fragen. Genau das machst du bei jeder:
 5. **Verbindung zu jedem Kunden** → Für jeden Kunden fragt es evtl.:
    - *„Are you sure you want to continue connecting?“* → **`yes`** tippen und Return drücken.
    - Ein **Passwort für diesen Server** → gib es ein, falls du es hast (frag Beren, wenn
-     unsicher). Falls du das Passwort eines bestimmten Servers nicht hast, wird dieser
-     Kunde übersprungen — du kannst ihn später hinzufügen; die anderen funktionieren
-     trotzdem.
+     unsicher). Fehlt dir das Passwort eines Servers, wird dieser Kunde übersprungen — die
+     anderen funktionieren trotzdem, und du kannst ihn später mit `wpsite setup --keys-only`
+     nachholen.
 
 Am Ende listet es auf, welche Kunden bereit sind. 🎉
 
@@ -211,13 +213,14 @@ vorher erledigt sein**; die App funktioniert nicht allein.
 
 - **„command not found: wpsite“** → Terminal schließen, neu öffnen, nochmal versuchen.
   Klappt es weiterhin nicht, Schritt 5 wiederholen.
-- **„team config unreachable“ / keine Kunden aufgelistet** → Google Drive ist nicht fertig
-  synchronisiert. Finder öffnen, Google Drive anklicken, prüfen, ob **01_Projekte** da ist,
-  eine Minute warten, nochmal versuchen.
+- **Keine Kunden aufgelistet / „not found“** → Google Drive ist nicht fertig synchronisiert,
+  oder mandos zeigt noch nicht auf die gemeinsame Liste. Finder öffnen, Google Drive anklicken,
+  prüfen, ob **01_Projekte** da ist, eine Minute warten, dann Schritt 6.1 (`mandos config init …`)
+  erneut ausführen.
 - **Docker-/Build-Fehler** → Sicherstellen, dass Docker Desktop läuft (Wal-Symbol in der
   Menüleiste). Falls nicht, aus **Programme** öffnen.
-- **Ein Kunde wurde beim Setup übersprungen** → Dir fehlte das Server-Passwort. Besorg es
-  und führe `wpsite setup --keys-only` aus, um es abzuschließen, oder frag Beren.
+- **Die Schlüssel-Installation für einen Server schlug fehl** → Dir fehlte das Server-Passwort.
+  Besorg es und führe `mandos client setup-key <kunde>` erneut aus, oder frag Beren.
 - **Immer noch fest?** Schick Beren einen Screenshot des Terminals — der Fehlertext sagt
   ihm genau, was los ist.
 
@@ -225,21 +228,28 @@ vorher erledigt sein**; die App funktioniert nicht allein.
 
 ## Für die Person, die das pflegt (Admin-Hinweise)
 
-Damit die „aus Google Drive kopieren“-Schritte oben funktionieren, müssen zwei Dinge in der
-geteilten Ablage unter **`01_Projekte/01_Global/wpsite/`** liegen (neben `wpsite.team.yml`):
+Damit die Schritte oben funktionieren, muss die geteilte Ablage unter
+**`01_Projekte/01_Global/`** Folgendes enthalten:
 
-1. **Eine Kopie des `wpsite`-Programmordners** (dieses Repository). Aktualisiere sie dort,
-   wann immer du Änderungen auslieferst, damit Kollegen die aktuelle Version kopieren.
-2. **Die gebaute Desktop-App** unter **`…/wpsite/app/wpsite.app`** (einmal mit den Schritten
+1. **`mandos/mandos.team.yml`** — die gemeinsame Kundenliste, die mandos liest (Schritt 6.1).
+2. **Eine Kopie des `wpsite`-Programmordners** (dieses Repository) unter `wpsite/`. Aktualisiere
+   sie dort, wann immer du Änderungen auslieferst, damit Kollegen die aktuelle Version kopieren.
+3. **Die gebaute Desktop-App** unter **`…/wpsite/app/wpsite.app`** (einmal mit den Schritten
    in [`GUI-Install.md`](GUI-Install.md) bauen, dann die `.app` dort ablegen). Bei Updates
    neu bauen + ersetzen.
 
+Außerdem braucht jeder Kollege das **`mandos`-Hilfsprogramm** auf seinem Mac (`make install`
+im mandos-Repo, oder ihm eine gebaute Binary geben).
+
 Hinweise:
-- `base_dir`, `cloud_base` und `team_config` sind **pro Person** (der Google-Drive-Pfad
-  jedes Kollegen enthält sein eigenes Konto), weshalb Schritt 6 sie per Drag-and-drop
-  ausfüllt statt mit einem festen Pfad.
-- SSH-Schlüssel sind **pro Person**: das Teilen der Konfiguration teilt keinen Serverzugang.
-  Jeder Kollege führt `wpsite setup` aus, das seinen Schlüssel erstellt und auf jedem Kunden
-  installiert (das sind die Passwortabfragen). Zugang erteilen/entziehen, indem der Schlüssel
-  der Person auf den Servern hinzugefügt/entfernt wird.
+- Kundenidentität, SSH-Schlüssel-Einrichtung und der Google-Drive-Stamm liegen jetzt in
+  **mandos** (`mandos config init` schreibt die `~/.config/mandos/mandos.yml` jedes Kollegen).
+  wpsites eigene Konfiguration enthält nur noch `base_dir`.
+- Der Pfad zur Team-Datei und `cloud_base` sind **pro Person** (der Google-Drive-Pfad jedes
+  Kollegen enthält sein eigenes Konto), weshalb Schritt 6 sie per Drag-and-drop ausfüllt statt
+  mit einem festen Pfad.
+- SSH-Schlüssel sind **pro Person**: das Teilen der Kundenliste teilt keinen Serverzugang.
+  Jeder Kollege führt `mandos client setup-key <kunde>` aus, das seinen Schlüssel erstellt und
+  auf dem Server installiert (die Passwortabfrage). Zugang erteilen/entziehen, indem der
+  Schlüssel der Person auf den Servern hinzugefügt/entfernt wird.
 - Die Aufbewahrung ist fest auf **5 Backups** pro Kunde; niemand muss das konfigurieren.

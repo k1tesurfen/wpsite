@@ -22,6 +22,7 @@ clients:
     cloud_dir: $CLOUD
 EOF
   export WPSITE_CONFIG="$CFG"
+  export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cloud.sh"
 }
