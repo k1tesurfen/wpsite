@@ -21,21 +21,35 @@ EOF
   export WPSITE_CONFIG="$CFG"
   export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   source "$REPO/lib/common.sh"
+  source "$REPO/lib/cmd_build.sh"        # provides _ensure_wp_cli (start reinstalls it)
   source "$REPO/lib/cmd_lifecycle.sh"
 
   # Stub requirements/commands
   require()          { :; }
-  
+
   CALLS="$BATS_TEST_TMPDIR/calls"
   : > "$CALLS"
-  
-  # Stub docker command to record calls
+
+  # Stub docker command to record calls. WP_RC drives the wp-cli presence check
+  # (0 = already installed, so the reinstall is skipped).
   docker() {
     if [ "$1" = "compose" ]; then
       shift
       echo "compose $*" >> "$CALLS"
+      return 0
     fi
+    if [ "$1" = "cp" ]; then shift; echo "cp $*" >> "$CALLS"; return 0; fi
+    if [ "$1" = "exec" ]; then
+      case "$*" in
+        *"-x /usr/local/bin/wp"*) return "${WP_RC:-0}" ;;
+        *) return 0 ;;
+      esac
+    fi
+    return 0
   }
+
+  # Warm host wp-cli cache so a reinstall takes the offline `docker cp` path.
+  mkdir -p "$BASE/.cache"; echo "phar" > "$BASE/.cache/wp-cli.phar"
 }
 
 @test "stop: stops single client" {
@@ -88,4 +102,43 @@ EOF
   [ "$status" -eq 0 ]
   grep -q "compose -p wpsite_acme up -d" "$CALLS"
   [[ "$output" == *"Starting 'acme' replica"* ]]
+}
+
+# `up -d` recreates a removed container (or one whose compose config changed), which
+# wipes the wp-cli phar from the container layer — start must put it back.
+
+@test "start: reinstalls wp-cli when the container came back without it" {
+  local d; d="$(client_docker_dir acme)"
+  mkdir -p "$d"; touch "$d/docker-compose.yml"
+
+  WP_RC=1 run cmd_start acme
+  [ "$status" -eq 0 ]
+  grep -qF "cp $BASE/.cache/wp-cli.phar wp_acme_app:/usr/local/bin/wp" "$CALLS"
+  [[ "$output" == *"Started"* ]]
+}
+
+@test "start: skips the wp-cli install when it is already present" {
+  local d; d="$(client_docker_dir acme)"
+  mkdir -p "$d"; touch "$d/docker-compose.yml"
+
+  WP_RC=0 run cmd_start acme
+  [ "$status" -eq 0 ]
+  ! grep -q "^cp " "$CALLS"
+}
+
+@test "start: warns but still succeeds when wp-cli cannot be installed" {
+  local d; d="$(client_docker_dir acme)"
+  mkdir -p "$d"; touch "$d/docker-compose.yml"
+
+  rm -f "$BASE/.cache/wp-cli.phar"
+  have() { return 1; }                    # no curl → cache stays empty
+  docker() {
+    if [ "$1" = compose ]; then shift; echo "compose $*" >> "$CALLS"; return 0; fi
+    if [ "$1" = exec ]; then return 1; fi # presence check AND the php download fail
+    return 0
+  }
+  run cmd_start acme
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wp-cli could not be (re)installed"* ]]
+  [[ "$output" == *"Started"* ]]
 }

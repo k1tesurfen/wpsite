@@ -11,7 +11,8 @@
 #   2. Writes docker-compose.override.yml adding a bind mount
 #      <path> → /var/www/html/wp-content/plugins/<slug>. Compose auto-merges the
 #      override (volumes are concatenated, so ./wp-content survives).
-#   3. Recreates the container (`up -d`) to apply the mount.
+#   3. Recreates the container (`up -d`) to apply the mount, then reinstalls wp-cli
+#      (the `up -d` recreate wipes it — it lives in the container layer, not a volume).
 #   4. --activate: activate the plugin via wp-cli after the mount. On a multisite
 #      dev site, --network activates it network-wide (--network implies --activate);
 #      without --network on a multisite it activates on the network's main site.
@@ -91,6 +92,15 @@ EOF
   log_info "Injecting $from → plugins/$slug in '$site'..."
   ( cd "$docker_dir" && docker compose -p "$project" up -d )
   log_ok "Injected. Edits in $from are now live at http://$(target_local_host "$site")"
+
+  # `up -d` above RECREATES the container to apply the mount, which wipes the wp-cli
+  # phar (docker cp'd into the container layer at build time, not a volume) — so a
+  # plain inject used to silently leave the dev site without wp-cli. Reinstall it
+  # unconditionally, not just on --activate. Best-effort: the mount is already done,
+  # so a failure here warns rather than failing the inject.
+  if ! _ensure_wp_cli "wp_${site}_app"; then
+    log_warn "wp-cli could not be (re)installed in wp_${site}_app — 'docker exec ... wp' will fail."
+  fi
 
   if [ "$activate" = 1 ]; then
     _activate_injected "wp_${site}_app" "$slug" "$network" "$(target_local_host "$site")"

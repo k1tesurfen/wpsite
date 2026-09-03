@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Staged wpsite CLI, copied in by scripts/stage-cli.sh at build time (see tauri.conf.json).
+src-tauri/resources/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

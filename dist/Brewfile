@@ -1,0 +1,7 @@
+# wpsite runtime dependencies (installed by install.command via `brew bundle`).
+# Homebrew itself is assumed already present on every colleague's machine.
+
+brew "yq"          # YAML config parsing — hard dependency
+brew "imagemagick" # placeholder image generation — only needed for `backup/clone --light`
+brew "ffmpeg"      # placeholder video generation — only needed for `--light`
+cask "docker"      # Docker Desktop — runs the local replicas

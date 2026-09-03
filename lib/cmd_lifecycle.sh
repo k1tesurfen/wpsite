@@ -21,6 +21,16 @@ cmd_start() {
   # `up -d` (not `start`) so it also recreates any containers that were removed,
   # reusing the existing DB volume — never re-imports or rebuilds.
   ( cd "$docker_dir" && docker compose -p "$project" up -d )
+
+  # A recreate (removed container, or a changed compose config) wipes the wp-cli phar
+  # — it lives in the container LAYER, docker cp'd in at build time, not in a volume.
+  # Put it back so `wp` is always there on a started site. Cheap no-op when the
+  # container was merely resumed (_ensure_wp_cli early-returns if the phar is present)
+  # and best-effort: the site is up either way, so a failure only warns.
+  if ! _ensure_wp_cli "wp_${client}_app"; then
+    log_warn "wp-cli could not be (re)installed in wp_${client}_app — 'docker exec ... wp' will fail."
+  fi
+
   log_ok "Started: http://$local_host"
 }
 

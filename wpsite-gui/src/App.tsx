@@ -2,13 +2,23 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { RefreshCw, Folder, FlaskConical, Settings, ExternalLink } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { RefreshCw, Folder, FlaskConical, Settings, ExternalLink, Trash2, Plus, Upload } from "lucide-react";
+import SetupScreen from "./SetupScreen";
 import "./App.css";
 
 interface SiteStatus {
   name: string;
   state: string;       // docker container state: running | exited | …
   admin_url: string;   // set only for running (reachable) sites
+}
+
+// One wpsite-managed .htaccess redirect (from `wpsite redirect list --porcelain`).
+interface RedirectRule {
+  source: string;
+  target: string;
+  code: string;
+  regex: boolean;
 }
 
 type ActiveTab = "client" | "dev" | "global";
@@ -19,6 +29,7 @@ interface CommandDescription {
   description: string;
   destructive?: boolean;
   form?: "clone" | "new";    // needs an input form (name / options) before running
+  redirect?: boolean;        // opens the redirect-management modal instead of running
   // Precondition on the selected site's local state — the card is disabled otherwise:
   //   "built"   → a replica exists (running or stopped)
   //   "running" → the replica is up
@@ -41,6 +52,13 @@ function App() {
   const [logs, setLogs] = useState<string>("");
   const [isRunning, setIsRunning] = useState<boolean>(false);
 
+  // First-run onboarding gate: null while checking, true → show the setup screen,
+  // false → the machine is configured, show the app. A ref mirrors it so the (once-
+  // registered) finished-event listener can re-check status after `wpsite setup` runs.
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  const needsSetupRef = useRef<boolean | null>(null);
+  needsSetupRef.current = needsSetup;
+
   // Destructive operations safety (type-the-name confirm)
   const [confirmOp, setConfirmOp] = useState<CommandDescription | null>(null);
   const [confirmInput, setConfirmInput] = useState<string>("");
@@ -51,6 +69,19 @@ function App() {
   const [formLight, setFormLight] = useState<boolean>(false);
   const [formBackups, setFormBackups] = useState<string[]>([]); // existing backups to clone from
   const [formBackup, setFormBackup] = useState<string>("");     // "" = fresh backup from server
+
+  // Redirect-management modal (production .htaccess). Open for one client at a time.
+  const [redirectClient, setRedirectClient] = useState<string | null>(null);
+  const redirectClientRef = useRef<string | null>(null);
+  redirectClientRef.current = redirectClient;
+  const [redirects, setRedirects] = useState<RedirectRule[]>([]);
+  const [redirectsLoading, setRedirectsLoading] = useState<boolean>(false);
+  const [redirectsError, setRedirectsError] = useState<string | null>(null);
+  const [rdSource, setRdSource] = useState<string>("");
+  const [rdTarget, setRdTarget] = useState<string>("");
+  const [rdCode, setRdCode] = useState<string>("301");
+  const [rdDeactivate, setRdDeactivate] = useState<boolean>(false);
+  const [rdReplace, setRdReplace] = useState<boolean>(false);
 
   const terminalRef = useRef<HTMLPreElement>(null);
 
@@ -105,6 +136,7 @@ function App() {
     { name: "Update", cmd: "upgrade", requires: "built", description: "Aktualisiert WordPress-Core, Themes und Plugins auf der lokalen Kopie – mit Screenshot-Vergleich vorher/nachher zur Kontrolle." },
     { name: "Update LIVE", cmd: "apply", destructive: true, description: "Führt das geprobte Update auf dem LIVE-Server des Kunden aus (macht vorher ein frisches Backup). Unwiderruflich – vorher immer lokal mit „Update“ testen!" },
     { name: "Entfernen", cmd: "destroy", destructive: true, requires: "built", description: "Entfernt die lokale Kopie vollständig – Container, Datenbank-Volume und Proxy-Route. Backups bleiben erhalten." },
+    { name: "Weiterleitungen", cmd: "redirect", redirect: true, description: "Verwaltet die Weiterleitungen in der .htaccess auf dem LIVE-Server (ersetzt das Redirection-Plugin): anzeigen, einzeln hinzufügen, per CSV importieren, aus dem Plugin übernehmen." },
   ];
 
   // Dev-Seiten-Aktionen (build/backup/apply gibt es hier nicht – die sind kundenspezifisch)
@@ -152,10 +184,100 @@ function App() {
     }
   };
 
+  // Read the client's current managed redirects from its LIVE server (a few seconds
+  // over SSH). Best-effort: on failure we show the error but keep the modal usable.
+  const refreshRedirects = async (client: string) => {
+    setRedirectsLoading(true);
+    setRedirectsError(null);
+    try {
+      setRedirects(await invoke<RedirectRule[]>("get_redirects", { client }));
+    } catch (err: any) {
+      setRedirects([]);
+      setRedirectsError(err?.toString() || "Weiterleitungen konnten nicht gelesen werden.");
+    } finally {
+      setRedirectsLoading(false);
+    }
+  };
+
+  const openRedirects = () => {
+    if (!selectedClient) return;
+    setRedirectClient(selectedClient);
+    setRedirects([]);
+    setRedirectsError(null);
+    setRdSource("");
+    setRdTarget("");
+    setRdCode("301");
+    setRdDeactivate(false);
+    setRdReplace(false);
+    refreshRedirects(selectedClient);
+  };
+
+  // A source path must be non-empty; a target too. The CLI normalizes slashes.
+  const rdAddReady = rdSource.trim().length > 0 && rdTarget.trim().length > 0;
+
+  // Run a redirect subcommand against the open client, keeping the modal open (the
+  // wpsite-finished listener re-reads the list). All writes pass --yes (no TTY here).
+  const runRedirect = async (sub: string, extra: string[]) => {
+    if (!redirectClient || isRunning) return;
+    await runCommand(`redirect ${sub}`, redirectClient, [...extra, "--yes"]);
+  };
+
+  const rdAdd = async () => {
+    if (!rdAddReady) return;
+    const src = rdSource.trim();
+    const tgt = rdTarget.trim();
+    setRdSource("");
+    setRdTarget("");
+    await runRedirect("add", [src, tgt, "--code", rdCode]);
+  };
+
+  const rdRemove = async (source: string) => {
+    await runRedirect("remove", [source]);
+  };
+
+  const rdImport = async () => {
+    const picked = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (typeof picked !== "string") return; // cancelled
+    const flags: string[] = [];
+    if (rdReplace) flags.push("--replace");
+    if (rdDeactivate) flags.push("--deactivate-plugin");
+    await runRedirect("import", [picked, ...flags]);
+  };
+
+  const rdMigrate = async () => {
+    const flags: string[] = [];
+    if (rdReplace) flags.push("--replace");
+    if (rdDeactivate) flags.push("--deactivate-plugin");
+    await runRedirect("migrate", flags);
+  };
+
+  // Decide whether this machine still needs onboarding. Only once it's configured do
+  // we load the site lists + warm the offline caches (both assume base_dir/mandos are set).
+  const checkSetup = async (): Promise<boolean> => {
+    try {
+      const st = await invoke<{ complete: boolean }>("get_setup_status");
+      setNeedsSetup(!st.complete);
+      return st.complete;
+    } catch {
+      // If we can't even ask, show setup — it surfaces the missing prerequisites.
+      setNeedsSetup(true);
+      return false;
+    }
+  };
+
   useEffect(() => {
-    refreshSites();
-    // First launch only: warm the offline caches (images + wp-cli) in the background.
-    invoke("prefetch_if_needed").catch(() => {});
+    (async () => {
+      const done = await checkSetup();
+      if (done) {
+        refreshSites();
+        // First launch only: warm the offline caches (images + wp-cli) in the background.
+        invoke("prefetch_if_needed").catch(() => {});
+      }
+    })();
   }, []);
 
   // If the selected dev site disappears (e.g. destroyed), fall back to the client tab.
@@ -182,8 +304,22 @@ function App() {
       });
       const unlistenFinished = await listen<void>("wpsite-finished", () => {
         setIsRunning(false);
-        // A finished command may have created/removed a site — refresh the sidebar.
-        refreshSites();
+        // During onboarding the only command is `wpsite setup` — re-check status and,
+        // once complete, drop the setup screen and load the app. Otherwise a finished
+        // command may have created/removed a site — refresh the sidebar.
+        if (needsSetupRef.current) {
+          (async () => {
+            const done = await checkSetup();
+            if (done) {
+              refreshSites();
+              invoke("prefetch_if_needed").catch(() => {});
+            }
+          })();
+        } else {
+          refreshSites();
+          // If the redirect modal is open, re-read the (possibly just-changed) list.
+          if (redirectClientRef.current) refreshRedirects(redirectClientRef.current);
+        }
       });
 
       if (cancelled) {
@@ -211,6 +347,12 @@ function App() {
 
   const executeCommand = async (cmdDesc: CommandDescription) => {
     if (isRunning) return;
+
+    // The redirect card opens its own management modal (list + add/import/migrate/remove).
+    if (cmdDesc.redirect) {
+      openRedirects();
+      return;
+    }
 
     // Commands needing an input form (clone, new).
     if (cmdDesc.form) {
@@ -326,6 +468,26 @@ function App() {
       : activeTab === "dev"
       ? `Lokale Dev-Seite ${selectedDev} verwalten`
       : "Dev-Seiten, Systemcheck, Proxy und Mail – für das ganze System";
+
+  // Still determining onboarding state — avoid flashing either UI.
+  if (needsSetup === null) {
+    return (
+      <div className="app-loading">
+        <span className="spinner" />
+      </div>
+    );
+  }
+
+  // First run (or a partial/broken config): show the onboarding screen instead of the app.
+  if (needsSetup) {
+    return (
+      <SetupScreen
+        logs={logs}
+        isRunning={isRunning}
+        onRunSetup={(args) => runCommand("setup", null, args)}
+      />
+    );
+  }
 
   return (
     <div className="app-container">
@@ -489,6 +651,10 @@ function App() {
                     onChange={(e) => setConfirmInput(e.target.value)}
                     placeholder={currentTarget || ""}
                     autoFocus
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    autoComplete="off"
+                    spellCheck={false}
                   />
                   <div className="confirm-buttons">
                     <button className="btn-cancel" onClick={() => setConfirmOp(null)}>
@@ -525,6 +691,10 @@ function App() {
                     onChange={(e) => setFormName(e.target.value)}
                     placeholder="z. B. acme-dev"
                     autoFocus
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    autoComplete="off"
+                    spellCheck={false}
                   />
                   {formName.length > 0 && !nameValid && (
                     <span className="form-hint error">Nur Kleinbuchstaben, Ziffern und Bindestriche (nicht am Anfang/Ende).</span>
@@ -572,6 +742,122 @@ function App() {
                       {formOp.form === "clone" ? "Klonen" : "Anlegen"}
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          ) : redirectClient ? (
+            <div className="confirm-overlay form redirect">
+              <div className="confirm-card">
+                <h3>Weiterleitungen – {redirectClient}</h3>
+                <p>
+                  Verwaltet den von wpsite betreuten Block in der <strong>.htaccess auf dem LIVE-Server</strong>.
+                  Vor jeder Änderung wird die .htaccess gesichert; danach wird die Startseite geprüft und bei
+                  einem Fehler automatisch zurückgerollt.
+                </p>
+
+                {/* Current redirects */}
+                <div className="redirect-list">
+                  {redirectsLoading ? (
+                    <div className="redirect-empty"><span className="spinner" /> Weiterleitungen werden vom Server gelesen …</div>
+                  ) : redirectsError ? (
+                    <div className="redirect-empty error">{redirectsError}</div>
+                  ) : redirects.length === 0 ? (
+                    <div className="redirect-empty">Noch keine von wpsite verwalteten Weiterleitungen.</div>
+                  ) : (
+                    <table className="redirect-table">
+                      <thead>
+                        <tr><th>Von</th><th>Nach</th><th>Code</th><th></th></tr>
+                      </thead>
+                      <tbody>
+                        {redirects.map((r) => (
+                          <tr key={`${r.source}|${r.regex}`}>
+                            <td className="mono">{r.source}{r.regex && <span className="regex-tag">regex</span>}</td>
+                            <td className="mono">{r.target}</td>
+                            <td className="mono">{r.code}</td>
+                            <td>
+                              <button
+                                className="redirect-remove"
+                                title="Diese Weiterleitung entfernen"
+                                disabled={isRunning}
+                                onClick={() => rdRemove(r.source)}
+                              >
+                                <Trash2 size={15} strokeWidth={2} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+
+                {/* Add a single redirect */}
+                <div className="redirect-add">
+                  <label>Einzelne Weiterleitung hinzufügen:</label>
+                  <div className="redirect-add-row">
+                    <input
+                      type="text"
+                      className="redirect-input"
+                      placeholder="/alter-pfad"
+                      value={rdSource}
+                      onChange={(e) => setRdSource(e.target.value)}
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <span className="redirect-arrow">→</span>
+                    <input
+                      type="text"
+                      className="redirect-input"
+                      placeholder="/neuer-pfad oder https://…"
+                      value={rdTarget}
+                      onChange={(e) => setRdTarget(e.target.value)}
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      autoComplete="off"
+                      spellCheck={false}
+                    />
+                    <select className="form-select" value={rdCode} onChange={(e) => setRdCode(e.target.value)}>
+                      <option value="301">301</option>
+                      <option value="302">302</option>
+                      <option value="307">307</option>
+                      <option value="308">308</option>
+                    </select>
+                    <button className="btn-primary redirect-add-btn" disabled={!rdAddReady || isRunning} onClick={rdAdd}>
+                      <Plus size={15} strokeWidth={2.5} /> Hinzufügen
+                    </button>
+                  </div>
+                </div>
+
+                {/* Bulk: import CSV / migrate from the plugin */}
+                <div className="redirect-bulk">
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={rdReplace} onChange={(e) => setRdReplace(e.target.checked)} />
+                    <span>Vorhandene wpsite-Weiterleitungen ersetzen (statt zusammenführen)</span>
+                  </label>
+                  <label className="checkbox-row">
+                    <input type="checkbox" checked={rdDeactivate} onChange={(e) => setRdDeactivate(e.target.checked)} />
+                    <span>Redirection-Plugin nach erfolgreichem Schreiben deaktivieren</span>
+                  </label>
+                  <div className="redirect-bulk-buttons">
+                    <button className="btn-primary" disabled={isRunning} onClick={rdImport}>
+                      <Upload size={15} strokeWidth={2} /> CSV importieren
+                    </button>
+                    <button className="btn-primary" disabled={isRunning} onClick={rdMigrate}>
+                      Aus Redirection-Plugin übernehmen
+                    </button>
+                  </div>
+                  <span className="form-hint">CSV-Spalten: Quelle,Ziel,Code,Regex – Kopfzeile optional, Code standardmäßig 301.</span>
+                </div>
+
+                <div className="confirm-buttons">
+                  <button className="btn-cancel" onClick={() => setRedirectClient(null)} disabled={isRunning}>
+                    Schließen
+                  </button>
+                  <button className="btn-cancel" onClick={() => refreshRedirects(redirectClient)} disabled={isRunning}>
+                    Neu laden
+                  </button>
                 </div>
               </div>
             </div>

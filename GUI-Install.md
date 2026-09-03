@@ -78,6 +78,18 @@ To create a standalone `.app` bundle that you can distribute to your colleagues 
 4.  **Installation:**
     You can simply drag and drop the `wpsite.app` file into your `~/Applications` or `/Applications` folder.
 
+    *Note:* `npm run tauri build` runs `beforeBuildCommand` → `npm run build:app`, which first
+    stages the `wpsite` CLI (`bin/` + `lib/`) into the app via `scripts/stage-cli.sh` so the
+    bundle carries its own CLI. The `mandos` CLI is **not** bundled into wpsite.app — it ships
+    inside `mandos.app` (separate repo) or is installed with `make install`.
+
+## Distributing to colleagues (installer)
+
+For a hand-off that installs everything (runtime deps + app(s) + CLIs) in one double-click,
+use `dist/install.command`. It assumes Homebrew is present, runs `brew bundle` (`dist/Brewfile`),
+copies the app(s) into `/Applications`, and symlinks the bundled CLIs onto `PATH`. See
+[`dist/README.md`](dist/README.md) for assembling the delivery folder and building a `.dmg`.
+
 ## Troubleshooting
 
 *   **Tauri Build Errors:** Ensure your Rust toolchain is up to date by running `rustup update`.

@@ -9,3 +9,7 @@
 .DS_Store
 
 CLAUDE.md
+
+# Assembled hand-off bundle (built .app copies + installer). Regenerate from dist/
+# + the two `tauri build` outputs; too large / binary to commit.
+/dist-bundle/

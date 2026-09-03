@@ -203,3 +203,41 @@ cstrict() {
   [ "$status" -eq 0 ]
   [[ "$output" == *__REACHED__* ]]
 }
+
+# --- redirect helpers (pure transforms, bare-statement guards) -------------
+
+# Strict-mode runner with just the redirect lib loaded.
+rstrict() { run env REPO="$REPO" bash -c 'set -euo pipefail
+    source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_redirect.sh"
+    '"$1"'
+    echo __REACHED__'; }
+
+@test "_redirect_extract_rules / _redirect_strip_block: empty input -> no abort" {
+  rstrict 'printf "" | _redirect_extract_rules; printf "" | _redirect_strip_block'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_redirect_merge: two empty rule sets -> no abort" {
+  rstrict 'a="$(mktemp)"; b="$(mktemp)"; _redirect_merge "$a" "$b"'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_redirect_parse_csv: empty file -> no abort" {
+  rstrict 'f="$(mktemp)"; s="$(mktemp)"; _redirect_parse_csv "$f" "$s"'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_redirect_filter_out / _redirect_print_rules: empty rules -> no abort" {
+  rstrict 'f="$(mktemp)"; _redirect_filter_out "$f" /x; _redirect_print_rules "$f"'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_redirect_build_block: empty rules -> no abort" {
+  rstrict 'f="$(mktemp)"; _redirect_build_block "$f" >/dev/null'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_redirect_regex_escape / _redirect_pattern / _redirect_target: bare-safe" {
+  rstrict '_redirect_regex_escape "a.b?c"; _redirect_pattern "/x/" 0; _redirect_pattern "^/y" 1; _redirect_target "z"'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}

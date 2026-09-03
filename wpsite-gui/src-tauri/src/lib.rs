@@ -29,6 +29,107 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+// Augmented PATH so the GUI finds Homebrew + /usr/local tools regardless of how it
+// was launched (Finder gives a bare PATH). Mirrors the value used on every Command.
+const AUG_PATH: &str = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin";
+
+// First-run machine onboarding state. The three fields map 1:1 to what `wpsite setup`
+// writes: `base_dir` (local data dir, wpsite config) + `team_config` + `cloud_base`
+// (both owned by mandos). `complete` is true only when ALL THREE are set — the GUI
+// treats a missing value as "not onboarded yet" and shows the setup screen.
+#[derive(serde::Serialize)]
+struct SetupStatus {
+    base_dir: String,
+    team_config: String,
+    cloud_base: String,
+    complete: bool,
+}
+
+// Read the wpsite config's `base_dir` (the only key wpsite owns). Uses the default
+// config path — the GUI never overrides WPSITE_CONFIG. Empty string if unset/absent.
+fn read_base_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cfg = format!("{home}/.config/wpsite/wpsite.yml");
+    let out = Command::new("yq")
+        .args(["-r", ".base_dir // \"\""])
+        .arg(&cfg)
+        .env("PATH", AUG_PATH)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if v == "null" { String::new() } else { v }
+        }
+        _ => String::new(),
+    }
+}
+
+// Ask mandos for one resolved config value (team-config / cloud base). Empty on any
+// failure (mandos missing, Drive unmounted, value unset) — the caller treats empty as
+// "not configured", which is exactly the state the setup screen exists to fix.
+fn mandos_value(args: &[&str]) -> String {
+    let out = Command::new("/usr/local/bin/mandos")
+        .args(args)
+        .env("PATH", AUG_PATH)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+#[tauri::command]
+fn get_setup_status() -> SetupStatus {
+    let base_dir = read_base_dir();
+    let team_config = mandos_value(&["config", "get", "team-config"]);
+    let cloud_base = mandos_value(&["cloud", "base"]);
+    let complete = !base_dir.is_empty() && !team_config.is_empty() && !cloud_base.is_empty();
+    SetupStatus { base_dir, team_config, cloud_base, complete }
+}
+
+// One external tool the GUI depends on, and whether it's installed (on PATH).
+#[derive(serde::Serialize)]
+struct Prerequisite {
+    name: String,
+    installed: bool,
+    hint: String,
+}
+
+// Is `bin` resolvable on the augmented PATH? Uses `command -v` in a shell so it works
+// for anything on PATH without needing a `--version` flag that varies per tool.
+fn on_path(bin: &str) -> bool {
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("command -v {bin}"))
+        .env("PATH", AUG_PATH)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+// Prerequisites the first-run screen blocks on: the CLI itself, mandos (client
+// registry / cloud), yq (config parsing) and docker (replicas). Presence on PATH only
+// — daemon health is `wpsite doctor`'s job.
+#[tauri::command]
+fn check_prerequisites() -> Vec<Prerequisite> {
+    let checks = [
+        ("wpsite", "brew install (dieses Repo) – die wpsite-CLI muss unter /usr/local/bin liegen."),
+        ("mandos", "Interne mandos-CLI installieren (verwaltet Kunden-Registry, SSH & Google Drive)."),
+        ("yq", "brew install yq"),
+        ("docker", "Docker Desktop installieren und starten."),
+    ];
+    checks
+        .iter()
+        .map(|(name, hint)| Prerequisite {
+            name: name.to_string(),
+            installed: on_path(name),
+            hint: hint.to_string(),
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn get_clients() -> Result<Vec<String>, String> {
     // Ask the CLI for the client names — it is the source of truth and knows about
@@ -69,6 +170,50 @@ fn get_backups(client: String) -> Result<Vec<String>, String> {
         .output();
 
     parse_name_lines(output)
+}
+
+// One wpsite-managed .htaccess redirect, as read back from the client's production
+// server via `wpsite redirect list --porcelain` (canonical source/target/code/regex).
+#[derive(serde::Serialize)]
+struct Redirect {
+    source: String,
+    target: String,
+    code: String,
+    regex: bool,
+}
+
+#[tauri::command]
+fn get_redirects(client: String) -> Result<Vec<Redirect>, String> {
+    // Reads the client's LIVE .htaccess over SSH (a few seconds). Porcelain output is one
+    // TAB-separated `source<TAB>target<TAB>code<TAB>regex` line per managed rule on stdout;
+    // warnings/errors go to stderr. A non-zero exit (offline, unreachable) is surfaced.
+    let output = Command::new("/usr/local/bin/wpsite")
+        .args(["redirect", "list", &client, "--porcelain"])
+        .env("PATH", AUG_PATH)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let rules = stdout
+                .lines()
+                .filter_map(|line| {
+                    if line.trim().is_empty() {
+                        return None;
+                    }
+                    let mut f = line.split('\t');
+                    let source = f.next()?.to_string();
+                    let target = f.next().unwrap_or("").to_string();
+                    let code = f.next().unwrap_or("301").to_string();
+                    let regex = f.next().unwrap_or("0") == "1";
+                    Some(Redirect { source, target, code, regex })
+                })
+                .collect();
+            Ok(rules)
+        }
+        Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        Err(e) => Err(format!("Failed to run wpsite: {}", e)),
+    }
 }
 
 // A built site (has a Docker container). `state` is the container state (running,
@@ -338,12 +483,13 @@ fn prefetch_if_needed(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             set_dock_icon();
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet, get_clients, get_dev_sites, get_backups, get_site_statuses, run_wpsite_command, prefetch_if_needed])
+        .invoke_handler(tauri::generate_handler![greet, get_clients, get_dev_sites, get_backups, get_redirects, get_site_statuses, run_wpsite_command, prefetch_if_needed, get_setup_status, check_prerequisites])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
