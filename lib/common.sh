@@ -86,6 +86,18 @@ _mtime() { # path
   return 0
 }
 
+# macOS ships `openrsync` (Apple's BSD-licensed reimplementation, swapped in years ago to
+# drop the GPLv3 dependency of classic rsync) as /usr/bin/rsync. It self-identifies via
+# `rsync --version`'s first line starting with "openrsync:" instead of "rsync  version".
+# openrsync has no --info, --skip-compress or --append-verify at all — passing them is a
+# hard `unrecognized option` failure, not a silent ignore. Homebrew's `rsync` formula
+# installs the real (samba/GNU) rsync 3.x, which has all three. Debian's `rsync` package
+# is already the real one. Capability-detected here, not by `uname`, so a Mac with
+# `brew install rsync` on PATH gets the fast path automatically. Run via `if`.
+_rsync_is_openrsync() {
+  rsync --version 2>&1 | head -1 | grep -q '^openrsync:'
+}
+
 # This machine's ROLE, or empty when unset (= unrestricted, the default). "dev" makes the
 # dispatcher refuse the gateway commands outright — see bin/wpsite. A GUARDRAIL against
 # running a production command on the wrong machine, NOT a security control: the real

@@ -87,7 +87,7 @@ t npx wp-scripts build       # another container, compiles src/ → build/, exit
 # once per feature — bind-mount the repo into the running site
 wpsite inject schatz-dev --from ~/git/pluginx --slug pluginx --activate
 
-# then, all day, in a tmux pane
+# then, all day, in a herdr pane
 t npx wp-scripts start       # watch mode: recompiles on every save
 ```
 
@@ -288,7 +288,8 @@ volume is a one-word change. Adding `--network none` also works for build-only s
 5. Wildcard `.test` DNS on the Mac pointing at the dev box's tailnet IP (A6).
 6. Firewall: allow `80`/`8025`/`8080` only on `tailscale0`, or set the bind address once
    `WPSITE_PROXY_BIND` exists (`DEVBOX-PLAN.md` §5.10).
-7. `tmux` on every long-running operation. Imports are measured in minutes.
+7. Run every long-running operation inside a `herdr` session/pane, not a bare SSH shell
+   — imports are measured in minutes, and a dropped connection must not kill one.
 8. Verify every plugin repo pushes to a real remote. **The dev box must be disposable:**
    if reinstalling it costs an afternoon rather than a week, "nuke it on suspicion"
    becomes an option you will actually take — which is worth more than most hardening

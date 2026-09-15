@@ -258,10 +258,17 @@ migration. Add a `pure.bats` case per branch.
 
 ### P2 — ergonomics and guardrails
 
-**8. `wpsite push <client> [devname]`** ✅ **DONE** — implemented as a SUBCOMMAND (`lib/cmd_push.sh`), not the standalone `bin/wpsite-push` first sketched: `install.sh` only symlinks `bin/wpsite`, so a second script would not be on PATH, and as a subcommand it inherits config, logging, `config_require_registry`, `client_get` and the role guard for free. On the gateway: `backup` →
-resolve the id with `wpsite list --backups` (returns only *complete* ids, newest first)
-→ `rsync` → `ssh devbox wpsite clone`. Reads `deactivate_plugins` from the registry and
-passes it through. One command, so the boundary is never worth shortcutting.
+**8. `wpsite push <client> [devname]`** ✅ **DONE** — implemented as a SUBCOMMAND (`lib/cmd_push.sh`), not the standalone `bin/wpsite-push` first sketched: `install.sh` only symlinks `bin/wpsite`, so a second script would not be on PATH, and as a subcommand it inherits config, logging, `config_require_registry`, `client_get` and the role guard for free. Default ships the newest *complete* local backup (no production hit) — symmetric with `clone` and with the two-step Workflow B example in §2 (`backup --light <c>` then `push`); pass `--fresh` to explicitly take a new one from production first, `--backup <id>` to ship a specific one. Then: `rsync` → `ssh devbox wpsite clone`. Reads
+`deactivate_plugins` from the registry and passes it through. One command, so the
+boundary is never worth shortcutting.
+
+Also handles the rsync-flag mismatch between platforms: macOS's stock rsync is
+`openrsync` (Apple's BSD reimplementation), which has no `--info=progress2`,
+`--skip-compress` or `--append-verify` — passing them is a hard failure, not a silent
+ignore. `_rsync_is_openrsync` (`common.sh`) detects this by capability (`rsync
+--version`'s first line), not by `uname`, and `cmd_push.sh` falls back to `--progress`
+and drops the other two on that path. `brew install rsync` gets the full GNU rsync and
+the fast path.
 
 **9. Remaining portability shims** ✅ **DONE** (`_pkg_hint` with item 5, `_mtime` now — note `_mtime` tries GNU `-c` FIRST and validates the result is numeric, because GNU's `-f` means `--file-system` and would treat `%m` as a filename, printing filesystem info on stdout while exiting non-zero). Correctness cleanups, not dev-box blockers, since
 both affected commands are gateway-only. Still worth doing because CI (item 12) runs a
@@ -330,14 +337,17 @@ Deliberately short:
 - `imagemagick` + `ffmpeg` — needed because the dev box is what regenerates placeholder
   media for `--light` packets (`cmd_build.sh:672-674`; skipped only when
   `media_map.txt` is absent, i.e. full backups)
-- `git`, `rsync`, `tmux`, `curl`, `openssh-client`, `bats`, `shellcheck`
+- `git`, `rsync`, `curl`, `openssh-client`, `bats`, `shellcheck`
 - Claude Code via the **native installer, not npm** — otherwise the first act on a
   machine built to avoid a global Node install is a global Node install
+- **`herdr`**, run from the Mac to reach this box — its persistent session survives a
+  dropped connection, which is the property this box needs from any terminal tool
 
 Not installed, ever: Node, PHP, Composer, mandos.
 
-`tmux` is not optional — a 1.1 GB clone over a dropped SSH session is a wasted half
-hour.
+A persistent session is not optional — a 1.1 GB clone over a dropped SSH connection is a
+wasted half hour. `herdr` already provides this (attach/reattach to the same running
+session), so there is nothing extra to install or run for it, and `tmux` is not needed.
 
 ---
 

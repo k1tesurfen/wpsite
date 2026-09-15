@@ -1,6 +1,7 @@
 # shellcheck shell=bash
-# wpsite push <client> [<devname>] — GATEWAY-ONLY: take a backup and ship it to the dev
-# box, then build it there as a dev site.
+# wpsite push <client> [<devname>] — GATEWAY-ONLY: ship the newest local backup to the
+# dev box and build it there as a dev site. Pass --fresh to take a new backup from
+# production first instead of shipping whatever is already on disk.
 #
 # This is the one command that spans both machines, and it exists so the gateway/dev-box
 # boundary is never worth shortcutting: the whole hop is `wpsite push acme`, so there is
@@ -18,9 +19,10 @@
 WPSITE_PUSH_SKIP_COMPRESS="gz,tgz,zip,bz2,xz,mp4,mov,webm,jpg,jpeg,png,gif,webp,pdf"
 
 cmd_push() {
-  local client="" devname="" backup_id="" full=1 devbox="" do_clone=1 replace=0 dry=0
+  local client="" devname="" backup_id="" full=1 devbox="" do_clone=1 replace=0 dry=0 fresh=0
   while [ $# -gt 0 ]; do
     case "$1" in
+      --fresh)     fresh=1; shift ;;
       --light)     full=0; shift ;;
       --full)      full=1; shift ;;
       --backup)    backup_id="${2:-}"; shift 2 ;;
@@ -41,7 +43,7 @@ cmd_push() {
   config_require_registry
   require rsync
   require ssh
-  [ -n "$client" ] || die "Usage: wpsite push <client> [<devname>] [--light] [--backup <id>] [--replace]"
+  [ -n "$client" ] || die "Usage: wpsite push <client> [<devname>] [--fresh [--light|--full]] [--backup <id>] [--replace]"
   require_client "$client"
 
   [ -n "$devname" ] || devname="$client-dev"
@@ -56,12 +58,20 @@ cmd_push() {
 …or pass --devbox <host> / set WPSITE_DEVBOX."
   local rbase; rbase="$(config_devbox_base)"
 
-  # --- 1. The packet: an existing backup, or a fresh one from production -----------
+  # --- 1. The packet: an existing backup (default), or a fresh one from production ---
+  # Default is the newest COMPLETE local backup — symmetric with `clone`, and matching
+  # the two-step Workflow B example in DEVBOX-PLAN.md §2 (`backup --light <c>` then
+  # `push`): once you've already taken a backup, push should ship it, not take another.
+  # Pass --fresh to explicitly take a new one from production (the old default).
   local latest
   if [ -n "$backup_id" ]; then
     latest="$(resolve_backup_dir "$client" "${backup_id%/}")"
     [ -d "$latest" ] || die "Backup '$backup_id' not found for '$client'. See: wpsite list --backups $client"
     log_info "Shipping existing backup $(basename "$latest") (no production access needed)."
+  elif [ "$fresh" != 1 ]; then
+    latest="$(latest_backup_dir "$client")"
+    [ -n "$latest" ] || die "No local backup for '$client' yet. Run 'wpsite backup --light $client' first, pass --backup <id>, or pass --fresh to take one now."
+    log_info "Shipping latest local backup $(basename "$latest") (no production access needed). Pass --fresh for a new one."
   elif [ "$dry" = 1 ]; then
     latest="$(latest_backup_dir "$client")"
     [ -n "$latest" ] || die "Nothing to dry-run: no complete backup on disk for '$client'."
@@ -95,9 +105,16 @@ cmd_push() {
       || die "Cannot reach or write on '$devbox' (tried: mkdir -p $remote_backups)."
     # --partial/--append-verify so a dropped tailnet link resumes instead of restarting
     # a multi-GB transfer; --skip-compress so only the compressible member is deflated.
-    rsync -a --info=progress2 --partial --append-verify \
-          --compress --skip-compress="$WPSITE_PUSH_SKIP_COMPRESS" \
-          "$latest" "$devbox:$remote_backups/" \
+    # These three (plus --info=progress2) don't exist in openrsync, macOS's stock rsync
+    # (see _rsync_is_openrsync) — fall back to broadly-supported flags there.
+    local rsync_flags=(-a --partial --compress)
+    if _rsync_is_openrsync; then
+      rsync_flags+=(--progress)
+      log_info "Note: system rsync is openrsync (macOS default) — retrying a dropped transfer re-diffs the partial file rather than fast-appending. 'brew install rsync' gets the full GNU rsync with --append-verify."
+    else
+      rsync_flags+=(--info=progress2 --append-verify --skip-compress="$WPSITE_PUSH_SKIP_COMPRESS")
+    fi
+    rsync "${rsync_flags[@]}" "$latest" "$devbox:$remote_backups/" \
       || die "rsync to '$devbox' failed; the dev box may hold a partial packet ($id)."
     log_ok "Packet $id delivered."
   fi

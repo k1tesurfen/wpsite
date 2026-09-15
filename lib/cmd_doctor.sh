@@ -21,7 +21,17 @@ cmd_doctor() {
   }
 
   log_info "Checking local dependencies..."
-  _check yq     yq             yq       "config parsing"
+
+  if have yq; then
+    log_ok "yq — config parsing"
+  elif have brew; then
+    log_error "yq missing (config parsing) → brew install yq"
+    fail=1
+  else
+    log_error "yq missing (config parsing) → install mikefarah/yq from https://github.com/mikefarah/yq/releases (NOT 'apt install yq' — that installs an unrelated Python jq-wrapper of the same name)"
+    fail=1
+  fi
+
   _check docker "--cask docker" docker-ce "containers"
   _check tar    gnu-tar        tar      "downloading backup artifacts"
   _check ffmpeg ffmpeg         ffmpeg   "video placeholders"
