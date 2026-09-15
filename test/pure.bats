@@ -117,3 +117,31 @@ setup() {
   _is_persistent_backup /some/path/20260101_120000-permanent
   run _is_persistent_backup 20260101_120000 ; [ "$status" -ne 0 ]
 }
+
+# --- backup age arithmetic (no `date -d`/`date -j`: those are the GNU/BSD split) ---
+
+@test "_days_from_civil: epoch and known dates" {
+  [ "$(_days_from_civil 1970 01 01)" = "0" ]
+  [ "$(_days_from_civil 1970 01 02)" = "1" ]
+  [ "$(_days_from_civil 2000 03 01)" = "11017" ]
+}
+
+@test "_days_from_civil: leap day and 08/09 are not read as octal" {
+  # 2024 is a leap year: Feb 29 exists and Mar 1 is the next day.
+  [ "$(( $(_days_from_civil 2024 03 01) - $(_days_from_civil 2024 02 29) ))" = "1" ]
+  # 08 and 09 would be invalid octal without 10# — these must not error.
+  [ "$(( $(_days_from_civil 2026 09 08) - $(_days_from_civil 2026 08 09) ))" = "30" ]
+}
+
+@test "_backup_age_days: tolerates the -permanent suffix, empty when unparseable" {
+  local today; today="$(date +%Y%m%d)"
+  [ "$(_backup_age_days "${today}_120000")" = "0" ]
+  [ "$(_backup_age_days "${today}_120000-permanent")" = "0" ]
+  [ -z "$(_backup_age_days "not-a-backup")" ]
+}
+
+@test "config_dev_suffix: defaults to test, strips a leading dot" {
+  [ "$(config_dev_suffix)" = "test" ]
+  [ "$(WPSITE_DEV_SUFFIX=dev.test config_dev_suffix)" = "dev.test" ]
+  [ "$(WPSITE_DEV_SUFFIX=.dev.test config_dev_suffix)" = "dev.test" ]
+}

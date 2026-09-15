@@ -4,7 +4,7 @@
 cmd_test() {
   local client="${1:-}"
   [ -n "$client" ] || die "Specify a <client> to test remote readiness."
-  config_require
+  config_require_registry
   require_client "$client"
 
   local ssh_target wp_root

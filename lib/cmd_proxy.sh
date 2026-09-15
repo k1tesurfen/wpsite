@@ -28,7 +28,7 @@ _proxy_ensure() {
   docker rm -f "$WPSITE_PROXY_CONTAINER" >/dev/null 2>&1 || true   # clear a dead leftover
   log_info "Starting shared reverse proxy (Traefik) on :80..."
   docker run -d --name "$WPSITE_PROXY_CONTAINER" --restart unless-stopped \
-    -p 80:80 \
+    -p "$(_port_spec 80 80)" \
     -v "$dyn":/etc/traefik/dynamic:ro \
     --network "$WPSITE_PROXY_NET" \
     "$WPSITE_PROXY_IMAGE" \
@@ -84,10 +84,11 @@ _proxy_status() {
   else
     log_info "Reverse proxy not running (starts automatically on 'wpsite build')."
   fi
-  if [ -f /etc/resolver/test ]; then
-    log_ok "Wildcard DNS configured (/etc/resolver/test → 127.0.0.1)"
-  else
-    log_warn "Wildcard *.test DNS not set up — run 'wpsite proxy install-dns' to drop the per-build sudo."
+  local resolver; resolver="$(wpsite_resolver_file)"
+  if [ -f "$resolver" ]; then
+    log_ok "Wildcard DNS configured ($resolver → 127.0.0.1)"
+  elif ! have brew; then
+    log_info "Wildcard *.test DNS not configured — normal here; per-site /etc/hosts entries are added on build."
   fi
   config_require 2>/dev/null || return 0
   local c state host
@@ -100,10 +101,39 @@ _proxy_status() {
   done < <(config_clients)
 }
 
-# One-time wildcard DNS: dnsmasq answers *.test with 127.0.0.1, and a macOS
-# resolver routes the .test TLD to it. Needs sudo (port 53 + /etc/resolver).
+# One-time wildcard DNS: dnsmasq answers *.test with 127.0.0.1 and the OS routes the
+# .test TLD to it. Automated for Homebrew/macOS only — see _proxy_install_dns.
 _proxy_install_dns() {
-  command -v brew >/dev/null 2>&1 || die "Homebrew required for dnsmasq setup."
+  if have brew; then _proxy_install_dns_brew; return; fi
+  # Deliberately NOT automated on Linux. The mechanism differs completely (dnsmasq must
+  # dodge systemd-resolved on :53, and routing a single TLD is a resolved drop-in, not a
+  # /etc/resolver file), it needs sudo against system DNS, and it is pure convenience:
+  # `_ensure_local_dns` already adds a per-site /etc/hosts entry on every build, which is
+  # all a headless box needs. Shipping an untested privileged DNS installer is worse than
+  # printing the four commands. See DEVBOX-PLAN.md §5.6.
+  log_warn "Automated wildcard-DNS setup is macOS/Homebrew only."
+  log_info "Not a problem: 'wpsite build' already adds a per-site /etc/hosts entry, so"
+  log_info "replicas resolve without this. Wildcard DNS only saves that one sudo."
+  log_info ""
+  log_info "To set it up by hand on Debian/systemd (dnsmasq on :5353 so it doesn't"
+  log_info "fight systemd-resolved, then route only the .test TLD to it):"
+  log_info ""
+  log_info "  sudo apt install dnsmasq"
+  log_info "  printf 'port=5353\\nlisten-address=127.0.0.1\\naddress=/test/127.0.0.1\\n' \\"
+  log_info "    | sudo tee /etc/dnsmasq.d/wpsite.conf"
+  log_info "  sudo mkdir -p /etc/systemd/resolved.conf.d"
+  log_info "  printf '[Resolve]\\nDNS=127.0.0.1:5353\\nDomains=~test\\n' \\"
+  log_info "    | sudo tee /etc/systemd/resolved.conf.d/wpsite-test.conf"
+  log_info "  sudo systemctl restart dnsmasq systemd-resolved"
+  log_info ""
+  log_info "Then point WPSITE_RESOLVER at a file you create as a marker, e.g.:"
+  log_info "  sudo mkdir -p /etc/resolver && sudo touch /etc/resolver/test"
+  log_info "so wpsite stops editing /etc/hosts (see _ensure_local_dns)."
+  die "Nothing was changed."
+}
+
+# macOS/Homebrew: dnsmasq on :53 as a system service + an /etc/resolver entry.
+_proxy_install_dns_brew() {
   if ! command -v dnsmasq >/dev/null 2>&1; then
     log_info "Installing dnsmasq..."; brew install dnsmasq
   fi

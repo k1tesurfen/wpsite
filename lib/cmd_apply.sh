@@ -84,7 +84,7 @@ _prod_versions() { # ssh_target wp_root dir suffix
 
 cmd_apply() {
   local client="${1:-}"
-  config_require
+  config_require_registry
   require_client "$client"
 
   local ssh_target wp_root

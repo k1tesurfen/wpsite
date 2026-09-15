@@ -52,6 +52,64 @@ _resolve_wp_image() { # wp php
   printf '%s' "$first"
 }
 
+# --- Host-matched WordPress image (native-Linux bind-mount ownership) -------------
+#
+# _render_compose bind-mounts ./wp-content into the container. On macOS, Docker
+# Desktop's filesystem layer fakes ownership, so the stock image is right and this is a
+# no-op. On NATIVE LINUX a bind mount preserves host UIDs: the extracted tree is owned
+# by the invoking user while Apache runs as www-data (33), so the replica RENDERS but
+# cannot WRITE — no uploads, no plugin/theme installs, no debug.log (which silently
+# blinds _debug_fatal_count), and every `|| true`-guarded wp-cli step no-ops.
+#
+# Chowning the tree to 33 only moves the problem: the host then cannot `rm -rf` it on
+# the next build. So instead we derive a one-off image whose www-data IS the host user
+# — the same trick _shot_image_ensure / _adminer_image_ensure already use. UIDs then
+# match on both sides and no chown is needed anywhere.
+#
+# Returns the tag to use, and the base tag unchanged whenever no remap is needed, so
+# macOS keeps using the official image and builds nothing. Never fatal: a failed build
+# falls back to the base image (the replica still runs; writes may fail) rather than
+# aborting. Run via $() — set -e safe.
+_wp_image_for_host() { # base_image
+  local base="$1" uid gid tag
+  uid="$(id -u)"; gid="$(id -g)"
+  # Docker Desktop remaps ownership for us; and a host user that already IS 33 matches.
+  if [ "$(uname -s)" = "Darwin" ] || { [ "$uid" = "33" ] && [ "$gid" = "33" ]; }; then
+    printf '%s' "$base"; return 0
+  fi
+  tag="wpsite/wordpress:$(printf '%s' "${base#wordpress:}" | tr -c 'A-Za-z0-9_.' '-')-u${uid}-g${gid}"
+  if docker image inspect "$tag" >/dev/null 2>&1; then
+    printf '%s' "$tag"; return 0
+  fi
+  log_info "Building host-matched WordPress image (one-time): $tag"
+  # The colliding-id shuffle matters: on Debian gid 20 is `dialout` and uid 1000 may
+  # already exist, and usermod/groupmod refuse a duplicate id.
+  if docker build -t "$tag" --build-arg "HOST_UID=$uid" --build-arg "HOST_GID=$gid" - <<EOF >/dev/null 2>&1
+FROM $base
+ARG HOST_UID
+ARG HOST_GID
+RUN set -eu; \
+    if [ "\$HOST_GID" != "33" ]; then \
+      old="\$(getent group "\$HOST_GID" | cut -d: -f1)"; \
+      if [ -n "\$old" ]; then groupmod -g 9033 "\$old"; fi; \
+      groupmod -g "\$HOST_GID" www-data; \
+    fi; \
+    if [ "\$HOST_UID" != "33" ]; then \
+      old="\$(getent passwd "\$HOST_UID" | cut -d: -f1)"; \
+      if [ -n "\$old" ]; then usermod -u 9033 "\$old"; fi; \
+      usermod -u "\$HOST_UID" www-data; \
+    fi; \
+    chown -R www-data:www-data /var/www /usr/src/wordpress
+EOF
+  then
+    printf '%s' "$tag"; return 0
+  fi
+  log_warn "Could not build the host-matched image; falling back to $base."
+  log_warn "  wp-content will be read-only to the container (no uploads/plugin installs)."
+  printf '%s' "$base"
+  return 0
+}
+
 # Best-effort production table prefix from a DB dump, for backups that predate
 # TABLE_PREFIX capture. Keys off the GLOBAL `<prefix>users` table (one per install
 # even on multisite, unlike per-blog `<prefix>N_options`); the backtick anchor
@@ -516,7 +574,7 @@ _set_known_admin() { # app_container local_url
 
 # Use wildcard DNS when it's configured; otherwise fall back to /etc/hosts.
 _ensure_local_dns() { # host
-  if [ -f "${WPSITE_RESOLVER:-/etc/resolver/test}" ]; then
+  if [ -f "$(wpsite_resolver_file)" ]; then
     log_debug "Wildcard *.test DNS active; not editing /etc/hosts."
     return 0
   fi
@@ -624,7 +682,7 @@ cmd_build() {
     esac
   done
 
-  config_require
+  config_require_registry
   require_client "$client"
   require docker
 
@@ -738,6 +796,9 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
   if [ "$image" != "$preferred" ]; then
     log_warn "Prod image $preferred isn't published — using closest available: $image"
   fi
+  # Match container UIDs to the host on native Linux (no-op on macOS). Must run AFTER
+  # resolution so the derived image is built FROM the tag we actually settled on.
+  image="$(_wp_image_for_host "$image")"
   log_info "WordPress image: $image"
 
   # --- Multisite: drive the local host + wp-config from the captured network ---

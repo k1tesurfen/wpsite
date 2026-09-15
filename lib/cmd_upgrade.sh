@@ -137,7 +137,7 @@ cmd_upgrade() {
       *) client="$1"; shift ;;
     esac
   done
-  config_require
+  config_require_registry
   require_client "$client"
   require docker
 

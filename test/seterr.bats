@@ -241,3 +241,39 @@ rstrict() { run env REPO="$REPO" bash -c 'set -euo pipefail
   rstrict '_redirect_regex_escape "a.b?c"; _redirect_pattern "/x/" 0; _redirect_pattern "^/y" 1; _redirect_target "z"'
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
 }
+
+# --- P0 dev-box helpers: all called as bare statements / in $() under set -e --------
+
+@test "latest_backup_dir: no backups dir at all -> does not abort" {
+  cstrict 'latest_backup_dir acme; latest_backup_dir nosuchclient'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "latest_backup_dir: only an INCOMPLETE backup -> empty, does not abort" {
+  cstrict 'mkdir -p "$TMP/root/clients/acme/backups/20260101_000000"
+           : > "$TMP/root/clients/acme/backups/20260101_000000/db.sql"
+           out="$(latest_backup_dir acme)"; [ -z "$out" ]'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "latest_backup_dir: picks the newest COMPLETE one by id name" {
+  cstrict 'b="$TMP/root/clients/acme/backups"
+           for id in 20260101_000000 20260615_120000; do
+             mkdir -p "$b/$id"
+             for f in db.sql wp-content.tar.gz meta.env; do echo x > "$b/$id/$f"; done
+           done
+           mkdir -p "$b/20261231_235959"; : > "$b/20261231_235959/db.sql"   # incomplete, newer
+           [ "$(basename "$(latest_backup_dir acme)")" = "20260615_120000" ]'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_backup_age_days / _days_from_civil / config_dev_suffix: bare-safe" {
+  cstrict '_backup_age_days 20260101_000000; _backup_age_days garbage
+           _days_from_civil 2026 09 05; config_dev_suffix'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_wp_image_for_host: bare statement safe, returns a tag" {
+  strict 'out="$(_wp_image_for_host wordpress:6.7-php8.3-apache)"; [ -n "$out" ]'
+  [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
+}

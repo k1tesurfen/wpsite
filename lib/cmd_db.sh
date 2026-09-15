@@ -72,7 +72,7 @@ _adminer_ensure() {
   log_info "Starting Adminer (shared DB browser) — http://localhost:$WPSITE_ADMINER_PORT"
   docker run -d --name "$WPSITE_ADMINER_CONTAINER" --restart unless-stopped \
     --network "$WPSITE_PROXY_NET" \
-    -p "$WPSITE_ADMINER_PORT:8080" \
+    -p "$(_port_spec "$WPSITE_ADMINER_PORT" 8080)" \
     "$WPSITE_ADMINER_IMAGE" >/dev/null \
     || die "Could not start Adminer — is port $WPSITE_ADMINER_PORT in use? (lsof -nP -i :$WPSITE_ADMINER_PORT)"
 }
@@ -120,10 +120,10 @@ _db_open() { # site
 
   _db_remember "$site"
   local url="http://localhost:${WPSITE_ADMINER_PORT}/?wpsite_server=${db_c}"
-  if have open; then
-    open "$url" >/dev/null 2>&1 || true
-  fi
+  # On a headless dev box there is no browser: _open_file prints the URL instead, so
+  # you can paste it into one on the machine you're sitting at (over the tailnet).
   log_ok "Adminer open for '$site' (login: root/root) — $url"
+  _open_file "$url"
 }
 
 # `wpsite db` with no site: reopen the last one. Never auto-builds/starts a site —

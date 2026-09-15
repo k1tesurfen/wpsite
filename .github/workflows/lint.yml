@@ -3,28 +3,85 @@ on:
   push:
   pull_request:
 
-# wpsite is a macOS-only tool (Homebrew + BSD userland + /System fonts + Docker
-# Desktop). Test on macOS so CI matches the only supported platform — running on
-# Linux produced false failures (GNU-vs-BSD date/ImageMagick, no /System fonts so
-# _placeholder_font returned non-zero) and used an older shellcheck that warns on
-# patterns newer versions accept.
+# wpsite targets TWO platforms from one codebase: macOS (gateway) and Debian 13
+# (headless dev box). See CLAUDE.md "What this is" and DEVBOX-PLAN.md.
+#
+# The matrix below is not decoration — it is the mechanism that keeps the single
+# codebase portable. A BSD-only utility flag (`stat -f %m`, `sed -i ''`) or a new
+# `uname` branch fails the Linux leg. Platform differences belong in a shim in
+# common.sh (_pkg_hint / _open_file / _mtime / _resolves_loopback / _port_spec), and
+# because those detect by CAPABILITY rather than OS, BOTH branches are exercised on
+# BOTH legs — see test/platform.bats.
+#
+# NEVER drop a platform from the matrix to make a build green; fix the shim instead.
+#
+# Tool versions are pinned rather than taken from apt/brew: Ubuntu's shellcheck is old
+# enough to warn on patterns newer versions accept, which used to produce false
+# failures on the Linux leg. Tests that genuinely need a platform capability (system
+# fonts, libx264, ImageMagick) skip themselves via `command -v` guards.
+
+env:
+  SHELLCHECK_VERSION: "0.10.0"
+  BATS_VERSION: "1.11.0"
+  YQ_VERSION: "4.44.3"
 
 jobs:
   shellcheck:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install shellcheck
-        run: brew install shellcheck
+      - name: Install shellcheck (pinned)
+        run: |
+          set -euo pipefail
+          # Derive both halves: macos-latest is arm64, ubuntu-latest is x86_64, and
+          # hardcoding either would break the moment a runner image changes arch.
+          case "$(uname -s)" in Darwin) os=darwin ;; *) os=linux ;; esac
+          case "$(uname -m)" in arm64|aarch64) cpu=aarch64 ;; *) cpu=x86_64 ;; esac
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.${os}.${cpu}.tar.xz"
+          curl -fsSL "$url" | tar -xJ
+          sudo install -m755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shellcheck --version
       - name: Run shellcheck
         run: shellcheck -x bin/wpsite lib/*.sh install.sh
 
   test:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install dependencies
-        # mikefarah yq (brew's `yq`), ImageMagick + ffmpeg for placeholders, bats runner.
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        # brew's `yq` IS mikefarah's — the one wpsite's syntax needs.
         run: brew install imagemagick ffmpeg yq bats-core
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends imagemagick ffmpeg rsync
+          # Debian's `yq` package is the PYTHON jq-wrapper — a different tool. wpsite
+          # needs mikefarah's Go yq (`yq -i`, `-e`, `del(...)`, comment preservation).
+          sudo curl -fsSL -o /usr/local/bin/yq \
+            "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+          sudo chmod +x /usr/local/bin/yq
+          # Ubuntu's `bats` package lags well behind; pin bats-core.
+          git clone --depth 1 --branch "v${BATS_VERSION}" https://github.com/bats-core/bats-core.git /tmp/bats
+          sudo /tmp/bats/install.sh /usr/local
+
+      - name: Show environment
+        run: |
+          echo "os: $(uname -s)  bash: $BASH_VERSION"
+          yq --version; bats --version
+          command -v magick || command -v convert || echo "no imagemagick"
+
       - name: Run tests
         run: bats test/

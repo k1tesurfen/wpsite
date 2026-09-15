@@ -111,10 +111,20 @@ EOF
   [[ "$output" == *"already exists"* ]]
 }
 
-@test "clone: refuses an unknown source client" {
+@test "clone: refuses a source with no complete backup on disk" {
+  # clone is local-only + registry-optional now: it no longer calls require_client, so
+  # the gate is "is there a complete backup under clients/<name>/backups/" instead.
   run cmd_clone ghost myshop
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"No complete backup on disk"* ]]
+}
+
+@test "clone: refuses an incomplete backup dir (half-transferred packet)" {
+  mkdir -p "$BASE/clients/acme/backups/20260101_000000"
+  : > "$BASE/clients/acme/backups/20260101_000000/db.sql"   # no tarball, no meta.env
+  run cmd_clone acme myshop
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No complete backup on disk"* ]]
 }
 
 @test "clone: refuses a devname that already exists" {
@@ -124,10 +134,20 @@ EOF
   [[ "$output" == *"already exists"* ]]
 }
 
-@test "clone: rejects --light and --full together" {
-  run cmd_clone acme myshop --light --full
+@test "clone: rejects --light/--full (media mode belongs to the backup)" {
+  # clone no longer takes a backup, so these flags are meaningless and must point at
+  # `wpsite backup --light` rather than being accepted as silent no-ops.
+  run cmd_clone acme myshop --light
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not both"* ]]
+  [[ "$output" == *"wpsite backup"* ]]
+  run cmd_clone acme myshop --full
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"wpsite backup"* ]]
+}
+
+@test "clone: dev host default follows WPSITE_DEV_SUFFIX" {
+  [ "$(WPSITE_DEV_SUFFIX=dev.test config_dev_suffix)" = "dev.test" ]
+  [ "$(config_dev_suffix)" = "test" ]
 }
 
 # --- set -e regression guards for new bare-statement helpers ---------------

@@ -21,6 +21,32 @@ base_dir: ~/websites
 # NOT configurable. To keep a backup indefinitely, persist it (`wpsite backup --persist`
 # or `wpsite backup persist <client> <id>`), which exempts it from the rotation.
 
+# This machine's ROLE. Unset (the default) = unrestricted. "dev" makes the dispatcher
+# refuse the gateway commands (apply, redirect, backup, client, push, test, prune) with a
+# pointer to the gateway. A guardrail against running a production command on the wrong
+# machine — NOT a security control; the real boundary is that a dev box holds no
+# production credential. Override per-invocation with WPSITE_ROLE.
+# role: dev
+
+# The dev box `wpsite push` ships backup packets to (gateway-side setting).
+# base_dir is that machine's base_dir; relative paths resolve against its $HOME.
+# devbox:
+#   host: devbox              # ssh target — e.g. a Tailscale name
+#   base_dir: websites
+
+# Not a config key, but related: WPSITE_BIND_ADDR confines the published ports of the
+# shared proxy (:80), Mailpit (:8025) and Adminer (:8080) to one address. Empty (default)
+# publishes on every interface. Set it to 127.0.0.1 — or a tailnet address — on a
+# networked dev box so replicas aren't exposed to the whole LAN.
+
+# Host suffix for DEV SITES only (client replicas always use bare .test). Default
+# "test". A dev box sets this so its sites land on <name>.dev.test and a gateway
+# serving *.test can coexist with it under one dnsmasq (longest match wins).
+# NEVER use ".dev": Google owns it as a real gTLD and the whole TLD is HSTS-preloaded,
+# so http:// is force-upgraded to https:// and these HTTP-only replicas break.
+# Overridable per-invocation with WPSITE_DEV_SUFFIX.
+# dev_suffix: dev.test
+
 # Local-only dev sites (sandboxes with no SSH source). You normally don't hand-edit
 # this — `wpsite new` and `wpsite clone` add entries, `wpsite destroy` removes them.
 # These stay LOCAL (never propagated to the cloud/team). Shown for reference:

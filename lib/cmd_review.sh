@@ -181,8 +181,8 @@ _smoke_check() { # docker_dir fatal_baseline specs...
   return 0
 }
 
-# Open a file/URL in the default app (macOS `open`).
-_open_file() { open "$1" >/dev/null 2>&1 || log_info "Open manually: $1"; }
+# _open_file lives in common.sh (platform shim: xdg-open / open / print).
+
 
 # Latest upgrades/<timestamp> dir for a client (most recent), or empty.
 _latest_upgrade_dir() { # client
@@ -252,7 +252,7 @@ FOOT
 
 cmd_review() {
   local client="${1:-}"
-  config_require
+  config_require_registry
   require_client "$client"
   local dir; dir="$(_latest_upgrade_dir "$client")"
   [ -n "$dir" ] && [ -f "$dir/review.html" ] \

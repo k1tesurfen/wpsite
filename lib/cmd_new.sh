@@ -43,14 +43,14 @@ cmd_new() {
     done
     wp="$(_prompt "WordPress version (blank = latest)" "$wp")"
     php="$(_prompt "PHP version" "${php:-8.2}")"
-    host="$(_prompt "Local host" "${host:-$name.test}")"
+    host="$(_prompt "Local host" "${host:-$name.$(config_dev_suffix)}")"
   fi
 
   _valid_site_name "$name" || die "Invalid site name '$name' (use lowercase letters, digits, hyphens)."
   [ -z "$(target_kind "$name")" ] || die "'$name' already exists as a $(target_kind "$name"). Choose another name."
 
   : "${php:=8.2}"
-  : "${host:=$name.test}"
+  : "${host:=$name.$(config_dev_suffix)}"
   local image local_url
   image="$(_resolve_wp_image "$wp" "$php")"
   local_url="http://$host"

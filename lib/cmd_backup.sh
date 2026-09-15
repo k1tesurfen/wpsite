@@ -317,7 +317,7 @@ cmd_backup() {
     esac
   done
 
-  config_require
+  config_require_registry
 
   # Determine the target client list (sequential — one remote server at a time).
   local clients=() c
@@ -369,7 +369,7 @@ _cmd_backup_sync() {
     esac
   done
 
-  config_require
+  config_require_registry
   [ -n "$(config_cloud_base)" ] || log_warn "cloud_base not set — only clients with an explicit cloud_dir will sync."
 
   if [ -n "$client" ]; then
@@ -395,7 +395,7 @@ _cmd_backup_persist() {
     esac
   done
 
-  config_require
+  config_require_registry
   [ -n "$client" ] && [ -n "$id" ] || die "Usage: wpsite backup persist <client> <backup-id> [--off]"
   require_client "$client"
 

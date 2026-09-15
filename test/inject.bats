@@ -128,7 +128,9 @@ EOF
 @test "inject warns but succeeds when wp-cli cannot be installed" {
   # Empty cache + a failing in-container download → _ensure_wp_cli returns non-zero.
   rm -f "$BASE/.cache/wp-cli.phar"
-  have() { return 1; }                      # no curl → cache stays empty
+  # Only curl is missing. A blanket `return 1` would also make `have "$MANDOS_BIN"`
+  # false, short-circuiting _mandos and thus target_kind — unrelated to this case.
+  have() { [ "$1" != curl ] && command -v "$1" >/dev/null 2>&1; }                      # no curl → cache stays empty
   docker() {
     if [ "$1" = compose ]; then shift; echo "compose $*" >> "$CALLS"; return 0; fi
     if [ "$1" = exec ]; then return 1; fi   # presence check AND the php download fail

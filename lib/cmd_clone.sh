@@ -1,18 +1,35 @@
 # shellcheck shell=bash
-# wpsite clone <client> <devname> — initialise a dev site FROM an existing client,
-# either from a fresh production backup (default) or a specified existing backup.
-# Reuses the full build pipeline (URL rewrite, known admin, Mailpit, plugin
-# sanitization) but targets a new local-only dev site under base_dir/dev/<devname>.
-# Media defaults to REAL (it's a working sandbox); pass --light for placeholders.
+# wpsite clone <name> <devname> — initialise a dev site FROM AN ON-DISK BACKUP.
+#
+# Local-only by design: it is exactly `build`, but into a dev site. It NEVER takes a
+# fresh backup and opens no SSH connection — run `wpsite backup <c>` (optionally
+# `--light`) first. That makes it behave identically on the gateway and on a dev box,
+# and means no replica-building command can reach production. See DEVBOX-PLAN.md §5.2.
+#
+# Registry-optional too: instead of require_client it only needs a complete backup under
+# <base_dir>/clients/<name>/backups/. On the gateway <name> is a real client (and its
+# deactivate_plugins list is picked up automatically); on a dev box with no mandos it is
+# simply the directory a pushed packet landed in, and --deactivate supplies the list.
+#
+# Reuses the full build pipeline via _build_from_backup (URL rewrite, known admin,
+# Mailpit, plugin sanitization) targeting base_dir/dev/<devname>.
 
 cmd_clone() {
-  local source="" devname="" backup_id="" full=1 light=0 full_set=0
+  local source="" devname="" backup_id="" deactivate="" host=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --backup)   backup_id="${2:-}"; shift 2 ;;
-      --backup=*) backup_id="${1#*=}"; shift ;;
-      --light)    light=1; full=0; shift ;;
-      --full)     full=1; full_set=1; shift ;;
+      --backup)     backup_id="${2:-}"; shift 2 ;;
+      --backup=*)   backup_id="${1#*=}"; shift ;;
+      --deactivate) deactivate="${2:-}"; shift 2 ;;
+      --deactivate=*) deactivate="${1#*=}"; shift ;;
+      --host)       host="${2:-}"; shift 2 ;;
+      --host=*)     host="${1#*=}"; shift ;;
+      # Media mode is a property of the BACKUP, not of the clone. These used to pick
+      # how the fresh backup was taken; there is no fresh backup any more.
+      --light|--full)
+        die "wpsite clone no longer takes a backup, so $1 has no meaning here.
+  Capture the media mode when you back up:  wpsite backup <client> --light
+  then clone from it:                       wpsite clone <client> <devname>" ;;
       -*) die "Unknown flag: $1" ;;
       *)
         if [ -z "$source" ]; then source="$1"; elif [ -z "$devname" ]; then devname="$1";
@@ -23,65 +40,68 @@ cmd_clone() {
 
   config_require
   require docker
-  [ -n "$source" ]  || die "Usage: wpsite clone <client> <devname> [--backup <id>] [--light]"
-  [ -n "$devname" ] || die "Usage: wpsite clone <client> <devname> [--backup <id>] [--light]"
-  [ "$light" = 1 ] && [ "$full_set" = 1 ] && die "Use either --light or --full, not both."
+  local usage="Usage: wpsite clone <name> <devname> [--backup <id>] [--deactivate <slugs>] [--host <host>]"
+  [ -n "$source" ]  || die "$usage"
+  [ -n "$devname" ] || die "$usage"
 
-  require_client "$source"
   _valid_site_name "$devname" || die "Invalid dev site name '$devname' (use lowercase letters, digits, hyphens)."
   [ -z "$(target_kind "$devname")" ] || die "'$devname' already exists as a $(target_kind "$devname"). Choose another name."
 
   _ensure_base_layout
-  local backup_dir latest
-  backup_dir="$(client_backup_dir "$source")"
 
+  # --- Select the backup: an explicit id, else the newest COMPLETE one -------------
+  local latest
   if [ -n "$backup_id" ]; then
-    # Use an existing backup as-is. Its media mode is fixed; --light/--full no-op.
-    if [ "$light" = 1 ] || [ "$full_set" = 1 ]; then
-      log_warn "Ignoring media flag — using existing backup '$backup_id' as captured."
-    fi
     latest="$(resolve_backup_dir "$source" "${backup_id%/}")"
-    [ -d "$latest" ] || die "Backup '$backup_id' not found for $source. See: wpsite list $source"
+    [ -d "$latest" ] || die "Backup '$backup_id' not found for '$source'. See: wpsite list --backups $source"
   else
-    # Take a fresh backup from production now (real media by default; --light = placeholders).
-    log_info "Taking a fresh $([ "$full" = 1 ] && echo 'full (real media)' || echo 'light (placeholder)') backup of '$source'..."
-    ssh_setup_mux
-    trap ssh_close_mux EXIT
-    _backup_one_client "$source" "$full" || die "Backup of '$source' failed; not cloning."
-    ssh_close_mux
-    trap - EXIT
-    # shellcheck disable=SC2012  # timestamp dirs; mtime sort via ls is fine
-    latest="$(ls -td "$backup_dir"/*/ 2>/dev/null | head -1)"
-    latest="${latest%/}"
+    latest="$(latest_backup_dir "$source")"
+    [ -n "$latest" ] || die "No complete backup on disk for '$source'.
+  On the gateway:  wpsite backup $source [--light]
+  On a dev box:    push one over first (see DEVBOX-PLAN.md)"
   fi
-  [ -f "$latest/db.sql" ] && [ -f "$latest/wp-content.tar.gz" ] \
-    || die "Backup at $latest is incomplete (missing db.sql or wp-content.tar.gz)."
+  _is_complete_backup "$latest" \
+    || die "Backup at $latest is incomplete (needs db.sql, wp-content.tar.gz and meta.env).
+  A half-transferred packet looks like this — re-run the copy."
 
-  local host="$devname.test"
-  log_info "Cloning '$source' → dev site '$devname' ($host) from $(basename "$latest")"
+  # Surface the backup's age: with fresh backups no longer automatic, cloning from a
+  # stale snapshot is now possible. Computed from the id (a timestamp), not the mtime.
+  local id age agetxt=""
+  id="$(basename "$latest")"
+  age="$(_backup_age_days "$id")"
+  [ -n "$age" ] && agetxt=" — ${age} day(s) old"
+  [ -n "$age" ] && [ "$age" -ge 30 ] && log_warn "Backup $id is ${age} days old; take a fresh one if the content matters."
+
+  [ -n "$host" ] || host="$devname.$(config_dev_suffix)"
+  log_info "Cloning '$source' → dev site '$devname' ($host) from $id$agetxt"
 
   # Multisite guard/notice: a network clone is reachable at MULTIPLE namespaced hosts,
-  # not just <devname>.test. Tell the user where (so they don't go looking at the
-  # bare host) and that mapped subsites fall back to a sanitized host.
+  # not just the bare one. Tell the user where (so they don't go looking at the bare
+  # host) and that mapped subsites fall back to a sanitized host.
   if [ "$(_meta_get MULTISITE "$latest/meta.env")" = "1" ] && [ -f "$latest/sites.csv" ]; then
-    log_warn "'$source' is a MULTISITE network — the clone is namespaced under '$devname.test':"
+    log_warn "'$source' is a MULTISITE network — the clone is namespaced under '$host':"
     local prod local_d
     while read -r prod local_d; do
       [ -n "$local_d" ] || continue
       log_warn "    $prod  →  http://$local_d"
     done < <(_ms_pairs "$latest/sites.csv" "$devname")
-    log_warn "  (subsites on unrelated mapped domains get a sanitized <host>.$devname.test)"
+    log_warn "  (subsites on unrelated mapped domains get a sanitized <host>.$host)"
   fi
+
+  # Plugin sanitization extras: explicit flag wins; otherwise fall back to the client
+  # registry, which yields the list on the gateway and empty on a registry-less dev box
+  # (client_get is || true-wrapped, so a missing mandos is not an error here).
+  [ -n "$deactivate" ] || deactivate="$(client_get "$source" deactivate_plugins)"
 
   # Register the dev site (written before the build so a failed build is cleanable
   # via `wpsite destroy $devname`).
   dev_set "$devname" host "$host"
   dev_set "$devname" source "$source"
-  dev_set "$devname" backup "$(basename "$latest")"
+  dev_set "$devname" backup "$id"
   dev_set "$devname" wp_version "$(_meta_get WP_VERSION "$latest/meta.env")"
   dev_set "$devname" php "$(_meta_get PHP_VERSION "$latest/meta.env")"
 
   # Pass devname as the multisite namespace so a network clone can't collide with the
   # client's own build (single-site clone ignores it).
-  _build_from_backup "$latest" "$devname" "$host" "$(client_get "$source" deactivate_plugins)" "$devname"
+  _build_from_backup "$latest" "$devname" "$host" "$deactivate" "$devname"
 }

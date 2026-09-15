@@ -17,14 +17,16 @@ _swap_tld() { printf '%s.test' "${1%.*}"; }
 #       <label>.<main>         → <label>.<ns>.test    (subdomain subsites)
 #       unrelated mapped domain→ <dom-dots-as-hyphens>.<ns>.test  (collision-free fallback)
 _ms_local_host() { # prod_domain main_prod_domain ns
-  local d="$1" main="$2" ns="$3"
+  local d="$1" main="$2" ns="$3" sfx
+  # ns empty = the CLIENT build path: always bare .test, never the dev suffix.
   if [ -z "$ns" ]; then _swap_tld "$d"; return; fi
+  sfx="$(config_dev_suffix)"
   if [ "$d" = "$main" ]; then
-    printf '%s.test' "$ns"
+    printf '%s.%s' "$ns" "$sfx"
   elif [ "$d" != "${d%".$main"}" ]; then          # d ends with ".$main" → subdomain subsite
-    printf '%s.%s.test' "${d%".$main"}" "$ns"
+    printf '%s.%s.%s' "${d%".$main"}" "$ns" "$sfx"
   else                                            # mapped domain on an unrelated host
-    printf '%s.%s.test' "$(printf '%s' "$d" | tr '.' '-')" "$ns"
+    printf '%s.%s.%s' "$(printf '%s' "$d" | tr '.' '-')" "$ns" "$sfx"
   fi
 }
 

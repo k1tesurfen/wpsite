@@ -23,7 +23,9 @@ cmd_list() {
   # picker so you can clone from an existing on-disk backup — no fresh backup / network).
   if [ "${1:-}" = "--backups" ]; then
     local bc="${2:-}" bdir d
-    { [ -n "$bc" ] && config_has_client "$bc"; } || return 0
+    # Registry-optional, like clone: gate on the backup DIRECTORY, not on the client
+    # existing in mandos, so a dev box with no registry can list the packets it holds.
+    [ -n "$bc" ] || return 0
     bdir="$(client_backup_dir "$bc")"
     [ -d "$bdir" ] || return 0
     while IFS= read -r d; do

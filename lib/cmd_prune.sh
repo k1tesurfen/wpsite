@@ -58,7 +58,7 @@ _prune_candidates() { # client keep older_days
   for (( i=start; i<n; i++ )); do
     d="${dirs[i]}"
     if [ -n "$older" ]; then
-      mtime="$(stat -f %m "$d" 2>/dev/null || echo "$now")"
+      mtime="$(_mtime "$d")"; [ -n "$mtime" ] || mtime="$now"
       [ "$(( now - mtime ))" -gt "$thresh" ] || continue
     fi
     printf '%s\n' "$d"
@@ -111,7 +111,7 @@ cmd_prune() {
     esac
   done
 
-  config_require
+  config_require_registry
   if [ -n "$keep" ]; then
     case "$keep" in ''|*[!0-9]*) die "--keep must be a whole number" ;; esac
   fi
@@ -174,7 +174,8 @@ cmd_prune() {
     cc="${entry%%|*}"; dd="${entry#*|}"
     sz="$(du -sh "$dd" 2>/dev/null | cut -f1)"
     kb="$(du -sk "$dd" 2>/dev/null | cut -f1)"; total_kb=$(( total_kb + ${kb:-0} ))
-    age=$(( (now - $(stat -f %m "$dd" 2>/dev/null || echo "$now")) / 86400 ))
+    local dmt; dmt="$(_mtime "$dd")"; [ -n "$dmt" ] || dmt="$now"
+    age=$(( (now - dmt) / 86400 ))
     printf '%-14s %-26s %-7s %dd\n' "$cc" "$(basename "$dd")" "${sz:-?}" "$age"
   done
   log_info "Total: ${#del[@]} backup(s), ~$(_human_kb "$total_kb")  (local + cloud)"

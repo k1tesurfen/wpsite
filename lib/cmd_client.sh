@@ -105,7 +105,7 @@ _client_add() {
     esac
   done
 
-  config_require
+  config_require_registry
   require ssh
 
   # Any required field missing → interactive wizard (needs a TTY to read answers).
@@ -249,7 +249,7 @@ _client_edit() {
     esac
   done
 
-  config_require
+  config_require_registry
   [ -n "$name" ] || die "Usage: wpsite client edit <name> [flags]"
   [ "$(target_kind "$name")" = "dev" ] && die "'$name' is a dev site, not a client (edit dev sites by rebuilding)."
   require_client "$name"
@@ -361,7 +361,7 @@ _client_remove() {
     esac
   done
 
-  config_require
+  config_require_registry
   [ -n "$name" ] || die "Usage: wpsite client remove <name> [--purge] [--yes]"
   [ "$(target_kind "$name")" = "dev" ] && die "'$name' is a dev site — remove it with: wpsite destroy $name"
   require_client "$name"

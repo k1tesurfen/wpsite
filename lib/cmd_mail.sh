@@ -26,7 +26,7 @@ _mail_ensure() {
   log_info "Starting Mailpit (traps all replica email) — inbox: http://localhost:$WPSITE_MAIL_UI_PORT"
   docker run -d --name "$WPSITE_MAIL_CONTAINER" --restart unless-stopped \
     --network "$WPSITE_PROXY_NET" --network-alias "$WPSITE_MAIL_HOST" \
-    -p "$WPSITE_MAIL_UI_PORT:8025" \
+    -p "$(_port_spec "$WPSITE_MAIL_UI_PORT" 8025)" \
     "$WPSITE_MAIL_IMAGE" >/dev/null \
     || die "Could not start Mailpit — is port $WPSITE_MAIL_UI_PORT in use? (lsof -nP -i :$WPSITE_MAIL_UI_PORT)"
 }

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # wpsite — snapshot production WordPress sites over SSH and rebuild
-#          near-perfect local replicas under Docker. macOS + Homebrew.
+#          near-perfect local replicas under Docker.
+#          Runs on macOS (gateway) and Debian 13 (dev box) — see CLAUDE.md.
 #
 set -euo pipefail
 
@@ -55,8 +56,17 @@ Commands:
           remove <name>  …remove a client (+replica); --purge also deletes its backups
   new     [name]      Create a fresh blank dev site (no name → wizard)
           --wp <ver> --php <ver> --host <h>   …pin versions / host (default latest/8.2)
-  clone   <client> <devname>   Create a dev site from a client (real media by default)
-          --backup <id>   …from an existing backup;  --light   …placeholder media
+  clone   <name> <devname>   Create a dev site from an ON-DISK backup (newest by
+                      default; never takes a fresh one — run 'backup' first)
+          --backup <id>      …use a specific backup
+          --deactivate <s>   …extra plugin slugs to deactivate (no registry needed)
+          --host <h>         …override the local hostname
+  push    <client> [<devname>]   GATEWAY: back up, ship the packet to the dev box over
+                      rsync, and build it there as a dev site
+          --light         …placeholder media (much smaller packet)
+          --backup <id>   …ship an existing backup (no production access)
+          --replace       …destroy an existing dev site there first
+          --no-clone --dry-run --devbox <host>
   inject  <devsite>   Live-mount a local plugin into a dev site (default: ~/git/aule)
           --from <path> --slug <name>   …mount any plugin checkout under any slug
           --activate [--network]        …activate after mount (--network = multisite-wide)
@@ -114,6 +124,20 @@ main() {
   [ $# -ge 1 ] || { usage; exit 1; }
 
   local cmd="$1"; shift
+
+  # Role guard: on a machine configured as role=dev, refuse the gateway commands rather
+  # than letting them fail obscurely deeper in. A guardrail against running a production
+  # command on the wrong machine at 11pm — NOT a security control: the real boundary is
+  # that a dev box holds no production credential at all. See DEVBOX-PLAN.md §5.10.
+  case "$cmd" in
+    apply|redirect|backup|client|push|test|prune)
+      if [ "$(config_role 2>/dev/null || true)" = "dev" ]; then
+        die "'$cmd' is a gateway command, and this machine is configured as role=dev.
+  Run it on the gateway — the machine holding the production SSH keys and Drive.
+  (Set by 'role: dev' in $WPSITE_CONFIG, or WPSITE_ROLE.)"
+      fi ;;
+  esac
+
   case "$cmd" in
     setup)   cmd_setup "$@" ;;
     backup)  cmd_backup "$@" ;;
@@ -121,6 +145,7 @@ main() {
     client)  cmd_client "$@" ;;
     new)     cmd_new "$@" ;;
     clone)   cmd_clone "$@" ;;
+    push)    cmd_push "$@" ;;
     inject)  cmd_inject "$@" ;;
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
