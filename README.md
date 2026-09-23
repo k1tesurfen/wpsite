@@ -23,7 +23,7 @@ git clone <this repo> && cd wpsite
                                   #   (WPSITE_BIN_DIR=~/.local/bin ./install.sh to change;
                                   #    ./install.sh --uninstall to remove)
 
-# mandos owns client identity, SSH key onboarding, and Google Drive paths — install it too:
+# mandos is the keyholder (client access: SSH targets + keys, Drive project folders) — install it too:
 cd ../mandos && make install      # builds & installs /usr/local/bin/mandos
 
 wpsite setup                      # one command: writes base_dir, points mandos at the
@@ -40,16 +40,17 @@ Client identity/SSH access and the Drive `cloud_base` root now live in **mandos*
 
 ```bash
 # Access (SSH target, WordPress path, keys) — mandos is the keyholder:
-mandos client add <name> --ssh <u@h> --wp-root <p>   # onboard access + install your SSH key
+mandos client add <name>  # guided wizard: SSH login, key, WordPress install, domain, Drive folder
 mandos client list        # who we have access to   (get/set/unset/remove/setup-key/has too)
 mandos client setup-key <c>   # (re)install your personal SSH key on a client's server
 # wpsite keeps its OWN registry (WordPress settings per client). A client joins wpsite
 # with its first backup:
-wpsite backup  <c>        # first run for an ID mandos knows → registers it in wpsite
+wpsite test    <c>        # readiness check; passing for an ID mandos knows → registers it
 wpsite show    <c>        # everything wpsite knows about a client (+ its mandos access)
 wpsite hold    <c> <plugin> [--reason "…"]   # never auto-update this plugin (upgrade + apply)
 wpsite manual  <c> <item>                    # reminder: update this by hand in wp-admin
 wpsite forget  <c>        # drop the client from wpsite (--purge: local backups too)
+wpsite maintenance <c> [off]   # status of apply's maintenance lock on production; off = lift it
 
 # Backup & build replicas
 wpsite backup  <client>   # snapshot a remote site → local backup artifacts (media → placeholders)

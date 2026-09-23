@@ -41,6 +41,8 @@ if [[ "$*" == *"db export"* ]]; then
   esac
   for a in "$@"; do case "$a" in /*) echo "-- dump" > "$a";; esac; done; exit 0
 fi
+# STUB_NOISY: a plugin printing a PHP warning on STDOUT before every answer (weinwege).
+if [ -n "${STUB_NOISY:-}" ]; then printf '\nWarning: Undefined array key "HTTP_HOST" in /x/multidomainmapping.php on line 81\n'; fi
 case "$*" in
   *is_multisite*)        echo "${STUB_MULTISITE:-0}" ;;
   *SUBDOMAIN_INSTALL*)   echo 1 ;;
@@ -65,7 +67,7 @@ run_backup() {
   { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nSWEEP_BASE=%q\nSWEEP_PREFIX=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX\n' \
       "$ROOT" "$OUT" "$1" "$mode" "${SWEEP_BASE:-}" "${SWEEP_PREFIX:-wpsite_acme_}"
     _backup_remote_script
-  } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" STUB_DB_FAIL="${STUB_DB_FAIL:-}" PATH="$STUB:$PATH" bash -s
+  } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" STUB_DB_FAIL="${STUB_DB_FAIL:-}" STUB_NOISY="${STUB_NOISY:-}" PATH="$STUB:$PATH" bash -s
 }
 in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
 
@@ -251,4 +253,16 @@ _td_meta() { # folder domain-url
   grep -q "$BATS_TEST_TMPDIR/home/.wpsite/wp-cli.phar db export" "$PHPLOG"
   grep -q "wp-cli.phar core version" "$PHPLOG"            # a call inside $(...)
   grep -q '^TABLE_PREFIX=hfm3_' "$OUT/meta.env"           # and its output still lands
+}
+
+# weinwege: a noisy plugin prints PHP warnings on stdout — they must never reach meta.env
+# or sites.csv (a polluted SOURCE_HOME would break the URL rewrite of every build).
+@test "noisy plugin: meta.env and sites.csv stay clean" {
+  STUB_NOISY=1 STUB_MULTISITE=1 run_backup ""
+  ! grep -q 'Warning' "$OUT/meta.env"
+  grep -qx 'SOURCE_HOME=https://x.de' "$OUT/meta.env"
+  grep -qx 'TABLE_PREFIX=hfm3_' "$OUT/meta.env"
+  grep -qx 'MULTISITE=1' "$OUT/meta.env"
+  ! grep -q 'Warning' "$OUT/sites.csv"
+  head -1 "$OUT/sites.csv" | grep -q '^blog_id,'
 }

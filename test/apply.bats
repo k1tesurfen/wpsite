@@ -40,6 +40,7 @@ setup() {
       *"plugin list"*field=name*) echo "akismet" ;;
       *"theme list"*field=name*)  echo "twentytwentyfour" ;;
       *WPSITE_BOOT_OK*)   echo "WPSITE_BOOT_OK" ;;
+      *"post list"*)      echo "https://acme.example/kontakt/" ;;
       *list*)             echo "name,version,update" ;;
     esac
   }
@@ -112,6 +113,7 @@ apply_run() { cmd_apply "$@"; }
     case "$*" in
       *is_multisite*)      echo 1 ;;
       *WPSITE_BOOT_OK*)    echo WPSITE_BOOT_OK ;;
+      *"site list"*"--field=url"*)  printf 'https://acme.example/\nhttps://shop.example.de/\n' ;;
       *"core version"*)    echo 6.5 ;;
       *"option get home"*) echo "https://acme.example" ;;
       *list*)              echo "name,version,update" ;;
@@ -120,7 +122,8 @@ apply_run() { cmd_apply "$@"; }
   run apply_run acme
   [ "$status" -eq 0 ]
   grep -q 'core update-db --network' "$CALLS"
-  [[ "$output" == *"Multisite network detected"* ]]
+  [[ "$output" == *"Multisite network: 2 site(s)"* ]]
+  [[ "$output" != *"does not yet cover multisite"* ]]   # the outdated warning is gone
 }
 
 @test "apply: site renders broken through the gate at the end -> maintenance KEPT ON (hold)" {
@@ -286,4 +289,115 @@ _stub_prod_drops_plugin() {
   grep -q 'plugin deactivate wp-mail-smtp --skip-plugins' "$CALLS"
   [[ "$output" == *"fatals on load"* ]]
   grep -q 'maintenance OFF' "$CALLS"     # site boots again after the re-deactivation → lifted
+}
+
+# --- The final check compares with a BASELINE taken before maintenance went on ----------
+# buymysite: WordPress redirects wp-login.php to /404 on purpose (hidden login). The old
+# check counted that 404 as "site broken" and kept a perfectly working site behind the 503.
+
+# curl stub: <url-glob>=<code> rules for BEFORE and AFTER maintenance went on (the phase
+# comes from the CALLS log). Default 200.
+_curl_phases() { # before_rules after_rules
+  CURL_BEFORE="$1"; CURL_AFTER="$2"
+  curl() {
+    local url="${!#}" rules="$CURL_BEFORE" r pat
+    grep -q 'maintenance ON' "$CALLS" && rules="$CURL_AFTER"
+    for r in $rules; do pat="${r%=*}"; case "$url" in $pat) printf '%s' "${r##*=}"; return 0 ;; esac; done
+    printf 200
+  }
+}
+
+@test "apply: a page that was ALREADY not ok before (hidden login) is not a failure" {
+  _backup_one_client() { return 0; }
+  _curl_phases '*wp-login.php=404' '*wp-login.php=404'
+  run apply_run acme
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -q 'maintenance OFF' "$CALLS"; ! grep -q 'maintenance HOLD' "$CALLS"
+  [[ "$output" == *"unchanged from before"* ]]
+}
+
+@test "apply: a subpage broken BY the apply is reported and fails the run — but the site goes live" {
+  _backup_one_client() { return 0; }
+  _curl_phases '' '*kontakt*=404'
+  run apply_run acme
+  [ "$status" -ne 0 ]
+  grep -q 'maintenance OFF' "$CALLS"; ! grep -q 'maintenance HOLD' "$CALLS"
+  [[ "$output" == *"kontakt"*"was ok/200, now down/404"* ]]
+  [[ "$output" == *"PROBLEMS"* ]]
+}
+
+@test "apply: even a subpage 500 doesn't hold a working site (home fine)" {
+  _backup_one_client() { return 0; }
+  _curl_phases '' '*kontakt*=500'
+  run apply_run acme
+  [ "$status" -ne 0 ]
+  grep -q 'maintenance OFF' "$CALLS"; ! grep -q 'maintenance HOLD' "$CALLS"
+}
+
+@test "apply: the HOME page broken after the apply → maintenance KEPT ON" {
+  _backup_one_client() { return 0; }
+  _curl_phases '' 'https://acme.example=500'
+  run apply_run acme
+  [ "$status" -ne 0 ]
+  grep -q 'maintenance HOLD' "$CALLS"; ! grep -q 'maintenance OFF' "$CALLS"
+  [[ "$output" == *"The HOME page is broken"* ]]
+}
+
+@test "apply: a custom login_path from wpsite's registry is the login page that's checked" {
+  source "$REPO/lib/cmd_apply.sh"
+  wclient_get() { [ "$2" = login_path ] && echo "/geheim-login"; return 0; }
+  _prod_wp() { shift 2; case "$*" in *"option get home"*) echo https://acme.example ;; esac; }
+  _apply_collect_verify_urls u@h /r "$BATS_TEST_TMPDIR/u" acme
+  grep -qx 'https://acme.example/geheim-login' "$BATS_TEST_TMPDIR/u"
+  ! grep -q 'wp-login.php' "$BATS_TEST_TMPDIR/u"
+}
+
+@test "_verify_compare: ok / unchanged / broken / fixed" {
+  printf 'ok\t200\thttps://a/\ndown\t404\thttps://a/login\nok\t200\thttps://a/k\ndown\t404\thttps://a/f\n' > "$BATS_TEST_TMPDIR/b"
+  printf 'ok\t200\thttps://a/\ndown\t404\thttps://a/login\ndown\t404\thttps://a/k\nok\t200\thttps://a/f\n' > "$BATS_TEST_TMPDIR/a"
+  run _verify_compare "$BATS_TEST_TMPDIR/b" "$BATS_TEST_TMPDIR/a" "$BATS_TEST_TMPDIR/c"
+  [ "$status" -ne 0 ]
+  [ "$(cut -f1 "$BATS_TEST_TMPDIR/c" | tr '\n' ' ')" = "ok unchanged broken fixed " ]
+}
+
+# --- multisite: per-site hold, verification + mail per site -------------------------------
+_stub_network() {
+  _prod_wp() {
+    shift 2; printf '%s\n' "$*" >> "$CALLS"
+    case "$*" in
+      *"core version"*)                 echo "6.5" ;;
+      *is_multisite*)                   echo 1 ;;
+      *WPSITE_BOOT_OK*)                 echo WPSITE_BOOT_OK ;;
+      *"option get home"*)              echo "https://acme.example" ;;
+      *"site list"*"--field=url"*)      printf 'https://acme.example/\nhttps://shop.example.de/\n' ;;
+      *"site list"*"--format=csv"*)     printf 'blog_id,url\n1,https://acme.example/\n2,https://shop.example.de/\n' ;;
+      *"post list"*shop.example.de*)    echo "https://shop.example.de/produkte/" ;;
+      *"post list"*)                    echo "https://acme.example/kontakt/" ;;
+      *"plugin list"*field=name*)       echo "akismet" ;;
+      *list*)                           echo "name,version,update" ;;
+    esac
+  }
+}
+
+@test "apply multisite: a broken SUBSITE is held on its own — the rest of the network goes live" {
+  _backup_one_client() { return 0; }
+  _stub_network
+  _curl_phases '' 'https://shop.example.de/=500 https://shop.example.de=500'
+  run apply_run acme
+  [ "$status" -ne 0 ]                                  # not a clean run
+  ! grep -q 'maintenance OFF' "$CALLS"                 # the lock stays — for ONE site
+  [[ "$output" == *"PARTLY LIVE"* ]]; [[ "$output" == *"shop.example.de"* ]]
+  [[ "$output" == *"The rest of the network is live"* ]]
+  grep -q 'wp_mail' "$CALLS"                           # the live site still got its test mail
+  [ "$(grep -c 'wp_mail' "$CALLS")" -eq 1 ]            # …but not the held one
+}
+
+@test "apply multisite: every site is verified and gets a test mail" {
+  _backup_one_client() { return 0; }
+  _stub_network
+  run apply_run acme
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep -c 'wp_mail' "$CALLS")" -eq 2 ]
+  grep -q -- 'eval --url=https://shop.example.de/' "$CALLS"
+  [[ "$output" == *"(2/2 sites)"* ]]
 }

@@ -27,12 +27,13 @@ _prod_wp() { # ssh_target wp_root wp-args...
   # If so, run it directly; otherwise run with PHP memory & time overrides.
   local remote_cmd
   # Host wp unusable → our uploaded phar (see _remote_wp_prepare); no sniffing needed.
+  # stdout is DATA: PHP diagnostics from noisy plugins are moved to stderr (_wp_filtered).
   if [ "${_WPSITE_WP_BUNDLED:-0}" = 1 ]; then
-    wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) $escaped_args --allow-root"
+    _wp_filtered wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) $escaped_args --allow-root"
     return
   fi
   remote_cmd="wp_bin=\$(which wp 2>/dev/null || echo wp); if [ -f \"\$wp_bin\" ] && head -n1 \"\$wp_bin\" 2>/dev/null | grep -qE \"sh|bash\"; then wp $escaped_args --allow-root; else php -d memory_limit=512M -d max_execution_time=300 \"\$wp_bin\" $escaped_args --allow-root; fi"
-  wpsite_ssh "$t" "cd '$root' && $remote_cmd"
+  _wp_filtered wpsite_ssh "$t" "cd '$root' && $remote_cmd"
 }
 
 # --- Maintenance mode that survives WordPress's own updater --------------------------
@@ -105,6 +106,10 @@ $wpsite_parts = preg_split( '/\s+/', trim( (string) @file_get_contents( $wpsite_
 $wpsite_until = isset( $wpsite_parts[0] ) ? (int) $wpsite_parts[0] : 0;
 $wpsite_token = isset( $wpsite_parts[1] ) ? (string) $wpsite_parts[1] : '';
 if ( $wpsite_until > 0 && time() > $wpsite_until ) { return; } // dead-man switch
+// Multisite: an optional list of blog IDs — only THOSE sites stay behind the 503 (the
+// rest of the network is live). No list = every site.
+$wpsite_only = isset( $wpsite_parts[2] ) ? array_filter( array_map( 'intval', explode( ',', $wpsite_parts[2] ) ) ) : array();
+if ( $wpsite_only && function_exists( 'get_current_blog_id' ) && ! in_array( get_current_blog_id(), $wpsite_only, true ) ) { return; }
 if ( $wpsite_token !== '' && isset( $_SERVER['HTTP_X_WPSITE_BYPASS'] )
 	&& hash_equals( $wpsite_token, (string) $_SERVER['HTTP_X_WPSITE_BYPASS'] ) ) { return; }
 if ( is_readable( WP_CONTENT_DIR . '/maintenance.php' ) ) { require WP_CONTENT_DIR . '/maintenance.php'; }
@@ -133,9 +138,15 @@ _prod_maintenance_refresh() { # ssh_target wp_root
 }
 
 # PERMANENT lock (site broken): no expiry on either. `$upgrading = time()` is evaluated
-# per request, so WordPress never considers it stale.
-_prod_maintenance_hold() { # ssh_target wp_root
-  local t="$1" root="$2"
+# per request, so WordPress never considers it stale. With blog IDs (multisite), ONLY
+# those sites stay behind the 503: the flag lists them and WordPress's network-wide
+# .maintenance is removed — the rest of the network goes live.
+_prod_maintenance_hold() { # ssh_target wp_root [blog_ids e.g. "3,5"]
+  local t="$1" root="$2" ids="${3:-}"
+  if [ -n "$ids" ]; then
+    wpsite_ssh "$t" "printf '0 %s %s\n' '${_WPSITE_MAINT_TOKEN:-}' '$ids' > '$root/wp-content/.wpsite-maintenance' && rm -f '$root/.maintenance'"
+    return
+  fi
   wpsite_ssh "$t" "printf '0 %s\n' '${_WPSITE_MAINT_TOKEN:-}' > '$root/wp-content/.wpsite-maintenance' && printf '<?php \$upgrading = time(); ?>' > '$root/.maintenance'"
 }
 
@@ -180,15 +191,96 @@ _site_probe() { # url [bypass_token]
 
 # The URLs the final check looks at: home, login, and a few published pages. Collected
 # BEFORE maintenance goes on, while the site is known to be healthy.
-_apply_collect_verify_urls() { # ssh_target wp_root outfile
-  local t="$1" root="$2" out="$3" home
-  home="$(_prod_wp "$t" "$root" option get home 2>/dev/null | tr -d '\r' || true)"
-  : > "$out"
+_apply_collect_verify_urls() { # ssh_target wp_root outfile [client]
+  local t="$1" root="$2" out="$3" client="${4:-}" home lp="" u sites="${3%/*}/verify.sites"
+  home="$(_prod_wp "$t" "$root" option get home 2>/dev/null | tr -d '\r' | grep -E '^https?://' | head -1 || true)"
+  : > "$out"; : > "$sites"
   [ -n "$home" ] || return 0
-  printf '%s\n%s/wp-login.php\n' "$home" "${home%/}" > "$out"
-  _prod_wp "$t" "$root" post list --post_type=page --post_status=publish --field=url \
-    --posts_per_page=4 2>/dev/null | tr -d '\r' | grep -E '^https?://' | grep -vxF "$home" >> "$out" || true
+  # The login page: the client's custom login_path (wpsite's registry) when set — many
+  # sites hide wp-login.php on purpose (buymysite: it 302s to /404).
+  [ -n "$client" ] && lp="$(wclient_get "$client" login_path)"
+  case "$lp" in ''|/*) ;; *) lp="/$lp" ;; esac
+  if [ -n "$_WPSITE_SITE_URLS" ]; then
+    # Multisite: EVERY site — its home page and one sample page (never a legal page).
+    # verify.sites maps each site's home to its blog ID for the per-site hold.
+    _ms_site_map _prod_wp "$t" "$root" > "$sites"
+    printf '%s\n%s%s\n' "$home" "${home%/}" "${lp:-/wp-login.php}" > "$out"
+    while IFS= read -r u; do
+      [ -n "$u" ] || continue
+      [ "${u%/}" = "${home%/}" ] || printf '%s\n' "$u" >> "$out"
+      _sample_pages 1 "$u" _prod_wp "$t" "$root" >> "$out"
+    done <<< "$_WPSITE_SITE_URLS"
+  else
+    printf '1\t%s\n' "$home" > "$sites"
+    printf '%s\n%s%s\n' "$home" "${home%/}" "${lp:-/wp-login.php}" > "$out"
+    _sample_pages 4 "$home" _prod_wp "$t" "$root" >> "$out"
+  fi
+  awk '!seen[$0]++' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
   return 0
+}
+
+# Sites to HOLD behind the 503 after the updates (blog IDs, comma-separated; "all" = the
+# main site itself is broken). A site is held when it doesn't boot or its HOME page is
+# hard-broken (fatal / 5xx / no answer / still a maintenance page) through the gate.
+_apply_sites_to_hold() { # sites_file gate_probe_file runner...
+  local sites="$1" gate="$2"; shift 2
+  local id url first=1 held="" broken
+  while IFS="$(printf '\t')" read -r id url; do
+    [ -n "$id" ] && [ -n "$url" ] || continue
+    broken=0
+    if ! "$@" eval 'echo "WPSITE_BOOT_OK";' --url="$url" 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK; then
+      broken=1
+    elif awk -F'\t' -v u="$url" 'BEGIN { r = 1 } { x = $3; sub(/\/$/, "", x); y = u; sub(/\/$/, "", y) }
+           x == y { r = !($1 == "fatal" || $1 == "maintenance" || $2 ~ /^(5|0)/); exit } END { exit r }' "$gate"; then
+      broken=1
+    fi
+    if [ "$broken" = 1 ]; then
+      [ "$first" = 1 ] && { printf 'all'; return 0; }
+      held="${held:+$held,}$id"
+    fi
+    first=0
+  done < "$sites"
+  printf '%s' "$held"
+  return 0
+}
+
+# The site URL (from verify.sites) of each held blog ID, one per line.
+_apply_held_urls() { # sites_file ids
+  local ids=",$2,"
+  awk -F'\t' -v ids="$ids" 'index(ids, "," $1 ",") { print $2 }' "$1"
+}
+
+# Compare a probe result with the BASELINE taken before maintenance went on. Writes
+# "<change>\t<before>\t<after>\t<url>" per URL (before/after = "verdict/code"), where change:
+#   ok         ok before, ok now
+#   unchanged  already not ok BEFORE the apply (e.g. a login page hidden on purpose — it
+#              404s every day) — the apply didn't cause it, so it isn't a failure
+#   broken     ok before, not ok now — a regression the run must report
+#   fixed      not ok before, ok now
+# No baseline entry counts as "ok before" (strict). Returns 0 iff nothing is broken.
+_verify_compare() { # before_file after_file out_file
+  awk -F'\t' -v OFS='\t' '
+    NR == FNR { b[$3] = $1 "/" $2; bv[$3] = $1; next }
+    { was = ($3 in bv) ? bv[$3] : "ok"; wasl = ($3 in b) ? b[$3] : "ok/?"
+      if ($1 == "ok") ch = (was == "ok") ? "ok" : "fixed"
+      else            ch = (was == "ok") ? "broken" : "unchanged"
+      if (ch == "broken") bad = 1
+      print ch, wasl, $1 "/" $2, $3 }
+    END { exit bad }' "$1" "$2" > "$3"
+}
+
+# Is the HOME page (the first URL) really broken — a PHP fatal, a 5xx, no answer, or still
+# a maintenance page? Only that (or a site that doesn't boot) keeps maintenance ON: a
+# single subpage going 404 must not hide a working site behind a 503.
+_home_hard_broken() { # probe_file
+  awk -F'\t' 'NR == 1 { exit !($1 == "fatal" || $1 == "maintenance" || $2 ~ /^(5|0)/) } END { if (NR == 0) exit 1 }' "$1"
+}
+
+# Human lines for the regressions / pre-existing problems in a compare file.
+_verify_explain() { # compare_file
+  awk -F'\t' '
+    $1 == "broken"    { printf "    ✗ %s — was %s, now %s\n", $4, $2, $3 }
+    $1 == "unchanged" { printf "    · %s — %s, the same as before the apply (not caused by it)\n", $4, $3 }' "$1"
 }
 
 # Probe every collected URL; writes "<verdict>\t<code>\t<url>" lines, returns 0 iff all ok.
@@ -208,15 +300,17 @@ _apply_probe_all() { # urls_file outfile [bypass_token]
 # Test mail through the site's REAL mailer (wp_mail → its SMTP plugin), always to OUR
 # inbox (settings.test_mail_to), never the customer's admin_email.
 WPSITE_TEST_MAIL_DEFAULT="admin@artismedia.de"
-_apply_test_mail() { # ssh_target wp_root client
-  local t="$1" root="$2" client="$3" to
+_apply_test_mail() { # ssh_target wp_root client [site_url]
+  local t="$1" root="$2" client="$3" site="${4:-}" to where="$3" urlarg=()
+  if [ -n "$site" ]; then where="${site#*://}"; where="${where%%/*}"; urlarg=(--url="$site"); fi
   to="$(wsetting_get test_mail_to)"; to="${to:-$WPSITE_TEST_MAIL_DEFAULT}"
   _APPLY_MAIL_TO="$to"
   # The PHP runs on the SERVER, so values are embedded — only after validating that they
   # can't break out of a single-quoted PHP string (client IDs are DNS labels anyway).
   [[ "$to" =~ ^[^@\'\"\\[:space:]]+@[^@\'\"\\[:space:]]+$ ]] || { log_warn "  settings.test_mail_to is not a plain address: $to"; return 1; }
   _valid_site_name "$client" || return 1
-  _prod_wp "$t" "$root" eval "\$ok = wp_mail('$to', '[wpsite] Mail-Test nach Wartung: $client', 'Automatischer Test von wpsite nach dem Wartungslauf auf ' . home_url() . '. Wenn diese Mail ankommt, versendet die Website E-Mails (Double-Opt-in, Formular-Antworten, ...).'); exit(\$ok ? 0 : 1);" >/dev/null 2>&1 < /dev/null
+  case "$where" in *[!A-Za-z0-9.-]*) where="$client" ;; esac   # a host name, safe to embed
+  _prod_wp "$t" "$root" eval ${urlarg[@]+"${urlarg[@]}"} "\$ok = wp_mail('$to', '[wpsite] Mail-Test nach Wartung: $where', 'Automatischer Test von wpsite nach dem Wartungslauf auf ' . home_url() . '. Wenn diese Mail ankommt, versendet die Website E-Mails (Double-Opt-in, Formular-Antworten, ...).'); exit(\$ok ? 0 : 1);" >/dev/null 2>&1 < /dev/null
 }
 
 # Capture name,version,update for plugins+themes from prod into the given dir.
@@ -239,6 +333,16 @@ _pf_fail() { log_error "  $*"; _PF_FAIL=1; }
 # Minimum free space (KB) on the WordPress filesystem for downloading + unpacking updates.
 WPSITE_PF_MIN_FREE_KB="${WPSITE_PF_MIN_FREE_KB:-204800}"
 
+# Free KB of <path> on the server via PHP's disk_free_space() — the fallback when `df` is
+# blocked for the SSH user (Mittwald: "df unavailable"). Empty when PHP can't tell either
+# (function disabled, open_basedir). Note it reports the FILESYSTEM, not a hosting quota.
+_pf_php_free_kb() { # ssh_target wp_root path
+  case "$3" in *"'"*|*\\*) return 0 ;; esac          # embedded in a PHP string below
+  _prod_wp "$1" "$2" eval "\$f = function_exists('disk_free_space') ? @disk_free_space('$3') : false; echo 'FREEB ' . (\$f === false ? '' : sprintf('%.0f', \$f)) . PHP_EOL;" \
+    </dev/null 2>/dev/null | tr -d '\r' | awk '/^FREEB [0-9]+/ { printf "%d\n", $2 / 1024; exit }' || true
+  return 0
+}
+
 _apply_preflight() { # client ssh_target wp_root
   local client="$1" t="$2" root="$3" out line
   _PF_FAIL=0
@@ -248,10 +352,29 @@ _apply_preflight() { # client ssh_target wp_root
   if wpsite_ssh "$t" "echo WPSITE_SSH_OK" </dev/null 2>/dev/null | grep -q WPSITE_SSH_OK; then _pf_ok "SSH works"
   else _pf_fail "SSH to $t fails"; return 1; fi
   [ "${_WPSITE_WP_BUNDLED:-0}" = 1 ] && _pf_info "using wpsite's bundled wp-cli (the host's wp is unusable)"
+  local site_urls="$_WPSITE_SITE_URLS"
+  _WPSITE_SITE_URLS=""                                # the main site first, on its own
   if _prod_wp "$t" "$root" core is-installed </dev/null >/dev/null 2>&1 && _site_boots _prod_wp "$t" "$root"; then
     _pf_ok "WP-CLI works and WordPress boots with all plugins"
   else
+    _WPSITE_SITE_URLS="$site_urls"
     _pf_fail "WP-CLI can't boot WordPress on production (see: wpsite test $client)"; return 1
+  fi
+  _WPSITE_SITE_URLS="$site_urls"
+  # Multisite: every other site of the network. A subsite that is ALREADY broken only
+  # warns — the final check compares with this state, so it isn't blamed on the apply.
+  if [ -n "$site_urls" ]; then
+    local su n=0 bad=""
+    while IFS= read -r su; do
+      [ -n "$su" ] || continue; n=$((n + 1)); [ "$n" = 1 ] && continue
+      if ! _prod_wp "$t" "$root" eval 'echo "WPSITE_BOOT_OK";' --url="$su" </dev/null 2>/dev/null | grep -q WPSITE_BOOT_OK; then
+        bad="$bad ${su#*://}"
+      elif [ "$(_site_probe "$su" | cut -f2)" != ok ]; then
+        bad="$bad ${su#*://}(HTTP $(_site_probe "$su" | cut -f1))"
+      fi
+    done <<< "$site_urls"
+    if [ -n "$bad" ]; then _pf_info "multisite: $n sites — ALREADY not working before the apply:$bad"
+    else _pf_ok "multisite: all $n sites boot and answer"; fi
   fi
 
   # The site must be healthy NOW — otherwise we couldn't tell later whether the updates
@@ -280,10 +403,11 @@ _apply_preflight() { # client ssh_target wp_root
   else
     local bad; bad="$(printf '%s\n' "$out" | grep '^FAIL' | sed 's/^FAIL //' | tr '\n' ',' | sed 's/,$//; s/,/, /g' || true)"
     if [ -n "$bad" ]; then _pf_fail "not writable: $bad"; else _pf_ok "write access: WP root, wp-content, plugins, themes, upgrade, languages, mu-plugins"; fi
-    local free; free="$(printf '%s\n' "$out" | awk '/^FREE / {print $2}' || true)"
-    if [ -z "$free" ]; then _pf_info "free space on the WordPress filesystem unknown (df unavailable)"
-    elif [ "$free" -lt "$WPSITE_PF_MIN_FREE_KB" ]; then _pf_fail "only $((free / 1024)) MB free on the WordPress filesystem (need ≥ $((WPSITE_PF_MIN_FREE_KB / 1024)) MB)"
-    else _pf_ok "free space: $((free / 1024)) MB"; fi
+    local free via=""; free="$(printf '%s\n' "$out" | awk '/^FREE / {print $2}' || true)"
+    if [ -z "$free" ]; then free="$(_pf_php_free_kb "$t" "$root" "$root")"; [ -n "$free" ] && via=" (via PHP)"; fi
+    if [ -z "$free" ]; then _pf_info "free space on the WordPress filesystem unknown (neither df nor PHP can tell)"
+    elif [ "$free" -lt "$WPSITE_PF_MIN_FREE_KB" ]; then _pf_fail "only $((free / 1024)) MB free on the WordPress filesystem$via (need ≥ $((WPSITE_PF_MIN_FREE_KB / 1024)) MB)"
+    else _pf_ok "free space: $((free / 1024)) MB$via"; fi
   fi
 
   # The server must be able to download updates (from PHP, as the updater does).
@@ -304,11 +428,12 @@ _apply_preflight() { # client ssh_target wp_root
   if ! printf '%s\n' "$out" | grep -qx OK; then
     _pf_fail "backup staging dir not writable: $stage (set remote_tmp for $client in wpsite's registry)"
   else
-    local sfree; sfree="$(printf '%s\n' "$out" | awk '/^FREE / {print $2}' || true)"
+    local sfree svia=""; sfree="$(printf '%s\n' "$out" | awk '/^FREE / {print $2}' || true)"
+    if [ -z "$sfree" ]; then sfree="$(_pf_php_free_kb "$t" "$root" "$stage")"; [ -n "$sfree" ] && svia=", via PHP"; fi
     if [ -n "$sfree" ] && [ -n "$need" ] && [ "$sfree" -lt $((need * 12 / 10)) ]; then
-      _pf_fail "backup staging dir $stage has $((sfree / 1024)) MB free, the last backup was $((need / 1024)) MB"
+      _pf_fail "backup staging dir $stage has $((sfree / 1024)) MB free$svia, the last backup was $((need / 1024)) MB"
     else
-      _pf_ok "backup staging dir: $stage${sfree:+ ($((sfree / 1024)) MB free)}"
+      _pf_ok "backup staging dir: $stage${sfree:+ ($((sfree / 1024)) MB free$svia)}"
     fi
   fi
 
@@ -348,7 +473,7 @@ _apply_preflight_plan() { # client ssh_target wp_root
 # (the stub repro that left maintenance ON after one failing `plugin list`) — the same
 # _apply_finish runs exactly once: decide the end state, verify the live site, send the
 # test mail, write whatever reports exist, and say clearly what happened.
-_AP_FINISHED=0; _AP_MAINT=0; _AP_UPDATES_DONE=0; _AP_OK=1; _AP_RC=1
+_AP_FINISHED=0; _AP_MAINT=0; _AP_UPDATES_DONE=0; _AP_OK=1; _AP_RC=1; _AP_HELD=""; _APPLY_MAIL_NOTE=""
 _AP_CLIENT=""; _AP_T=""; _AP_ROOT=""; _AP_DIR=""; _AP_STAMP=""; _AP_BACKUP=""; _AP_CORE_BEFORE=""
 
 _apply_step_hook() { _prod_maintenance_refresh "$_AP_T" "$_AP_ROOT" >/dev/null 2>&1 || true; }
@@ -374,7 +499,7 @@ _apply_signal_trap() {
 _apply_arm() { # client ssh_target wp_root
   _AP_CLIENT="$1"; _AP_T="$2"; _AP_ROOT="$3"
   _AP_FINISHED=0; _AP_MAINT=0; _AP_UPDATES_DONE=0; _AP_OK=1; _AP_RC=1
-  _AP_DIR=""; _AP_STAMP=""; _AP_BACKUP=""; _AP_CORE_BEFORE=""
+  _AP_DIR=""; _AP_STAMP=""; _AP_BACKUP=""; _AP_CORE_BEFORE=""; _AP_HELD=""; _APPLY_MAIL_NOTE=""
   trap _apply_exit_trap EXIT
   trap _apply_signal_trap INT TERM
 }
@@ -390,48 +515,107 @@ _apply_finish() { # normal|abort
   local t="$_AP_T" root="$_AP_ROOT" dir="$_AP_DIR" state="untouched" live="skipped" mail="skipped" boots=0
   local urls=""; [ -n "$dir" ] && urls="$dir/verify.urls"
 
+  # "boots" = the MAIN site boots (the whole network then isn't down); subsites are judged
+  # one by one in _apply_sites_to_hold.
+  local all_sites="$_WPSITE_SITE_URLS"; _WPSITE_SITE_URLS=""
   _site_boots _prod_wp "$t" "$root" && boots=1
+  _WPSITE_SITE_URLS="$all_sites"
 
   # 1) End state. Only relevant once maintenance was switched on.
   if [ "$_AP_MAINT" = 1 ]; then
     log_info "[4/5] Deciding the end state (maintenance is still ON)..."
+    # Maintenance stays ON only when the site is really broken: WordPress doesn't boot, or
+    # the HOME page (seen through our gate) is a fatal / 5xx / no answer. Everything else is
+    # compared with the baseline and reported — a hidden login page that 404s every day
+    # (buymysite) once kept a perfectly working site behind the 503.
+    # Multisite: decided PER SITE — a broken subsite stays behind the 503 on its own
+    # (_apply_sites_to_hold), the rest of the network goes live.
     local real_ok=0
     if [ "$boots" = 1 ]; then
       _prod_maintenance_lift_wp "$t" "$root"          # our gate stays up for visitors
       if [ -n "$urls" ] && [ -s "$urls" ]; then
-        _apply_probe_all "$urls" "$dir/verify.gate.txt" "$_WPSITE_MAINT_TOKEN" && real_ok=1
+        _apply_probe_all "$urls" "$dir/verify.gate.txt" "$_WPSITE_MAINT_TOKEN"
+        if [ -s "$dir/verify.sites" ]; then
+          _AP_HELD="$(_apply_sites_to_hold "$dir/verify.sites" "$dir/verify.gate.txt" _prod_wp "$t" "$root")"
+        elif _home_hard_broken "$dir/verify.gate.txt"; then
+          _AP_HELD="all"
+        fi
+        [ "$_AP_HELD" = all ] || real_ok=1
+        if [ -f "$dir/verify.before.txt" ] && ! _verify_compare "$dir/verify.before.txt" "$dir/verify.gate.txt" "$dir/verify.gate.compare.txt"; then
+          log_warn "  Pages that worked before the apply and don't now:"
+          _verify_explain "$dir/verify.gate.compare.txt" | grep '✗' >&2 || true
+        fi
       else
         real_ok=1                                     # no URLs to look at: boot check only
       fi
     fi
-    if [ "$real_ok" = 1 ]; then
+    if [ "$real_ok" = 1 ] && [ -n "$_AP_HELD" ]; then
+      # Part of a network is broken: hold exactly those sites, the rest goes live.
+      if _prod_maintenance_hold "$t" "$root" "$_AP_HELD"; then
+        state="partial"
+        log_error "  Held behind the 503 (they don't boot or their home page is broken):"
+        _apply_held_urls "$dir/verify.sites" "$_AP_HELD" | sed 's/^/    ✗ /' >&2
+        log_ok "  The rest of the network is live."
+        log_error "  Lift the hold once fixed:  wpsite maintenance $_AP_CLIENT off"
+      else
+        state="stuck"
+        log_error "  Could not set the per-site hold — maintenance may still be on everywhere:  wpsite maintenance $_AP_CLIENT status"
+      fi
+    elif [ "$real_ok" = 1 ]; then
       if _prod_maintenance_off "$t" "$root"; then
         state="live"; log_ok "  Site boots and renders — maintenance OFF."
       else
         state="stuck"
-        log_error "  Could not switch maintenance off! Do it by hand NOW:"
-        log_error "    $(_maintenance_manual_cmd "$t" "$root")"
+        log_error "  Could not switch maintenance off! Do it NOW:  wpsite maintenance $_AP_CLIENT off"
+        log_error "    (or by hand: $(_maintenance_manual_cmd "$t" "$root"))"
       fi
     else
       _prod_maintenance_hold "$t" "$root"
       state="held"
-      log_error "  The site does NOT $([ "$boots" = 1 ] && echo "render cleanly" || echo "boot") — maintenance stays ON (permanent) so visitors see a clean 503."
+      log_error "  $([ "$boots" = 1 ] && echo "The HOME page is broken ($(head -1 "$dir/verify.gate.txt" | cut -f1,2 | tr '\t' ' '))" || echo "WordPress does NOT boot") — maintenance stays ON (permanent) so visitors see a clean 503."
       [ -n "$dir" ] && [ -s "$dir/verify.gate.txt" ] && log_error "  What the site returned: $dir/verify.gate.txt"
-      log_error "  Lift it by hand once fixed:  $(_maintenance_manual_cmd "$t" "$root")"
+      log_error "  Lift it once fixed:  wpsite maintenance $_AP_CLIENT off"
     fi
   fi
 
   # 2) What does a VISITOR see now? (skipped while we deliberately hold maintenance)
   if [ "$state" != "held" ] && [ -n "$urls" ] && [ -s "$urls" ]; then
     log_info "[5/5] Verifying the live site..."
-    if _apply_probe_all "$urls" "$dir/verify.txt"; then live="ok"; else live="problems"; fi
+    local vurls="$urls" hu
+    if [ -n "$_AP_HELD" ] && [ "$_AP_HELD" != all ]; then
+      # Pages of held sites show the 503 on purpose — only the live ones are verified.
+      vurls="$dir/verify.visitor.urls"; cp "$urls" "$vurls"
+      while IFS= read -r hu; do
+        [ -n "$hu" ] || continue
+        awk -v p="${hu%/}" 'index($0, p) != 1' "$vurls" > "$vurls.tmp" && mv "$vurls.tmp" "$vurls"
+      done < <(_apply_held_urls "$dir/verify.sites" "$_AP_HELD")
+    fi
+    _apply_probe_all "$vurls" "$dir/verify.txt"
+    if [ -f "$dir/verify.before.txt" ]; then
+      if _verify_compare "$dir/verify.before.txt" "$dir/verify.txt" "$dir/verify.compare.txt"; then live="ok"; else live="problems"; fi
+      _verify_explain "$dir/verify.compare.txt" >&2
+    elif grep -qv '^ok' "$dir/verify.txt"; then live="problems"; else live="ok"; fi
   elif [ "$state" != "held" ] && [ -z "$dir" ]; then
     live="skipped"                                    # stopped before anything was collected
   fi
 
-  # 3) Test mail through the site's real mailer (needs a booting site).
+  # 3) Test mail through the site's real mailer (needs a booting site). Multisite: one per
+  # live site — each site can have its own mailer settings (WP Mail SMTP is per site).
   if [ "$boots" = 1 ]; then
-    if _apply_test_mail "$t" "$root" "$_AP_CLIENT"; then mail="sent"; else mail="FAILED"; fi
+    if [ -s "${dir:-/nonexistent}/verify.sites" ] && [ "$(grep -c . "$dir/verify.sites")" -gt 1 ]; then
+      local sid surl sent=0 total=0 failed_sites=""
+      while IFS="$(printf '\t')" read -r sid surl; do
+        [ -n "$sid" ] || continue
+        case ",$_AP_HELD," in *",$sid,"*) continue ;; esac
+        total=$((total + 1))
+        if _apply_test_mail "$t" "$root" "$_AP_CLIENT" "$surl"; then sent=$((sent + 1))
+        else failed_sites="$failed_sites ${surl#*://}"; fi
+      done < "$dir/verify.sites"
+      if [ "$sent" = "$total" ]; then mail="sent"; _APPLY_MAIL_NOTE=" ($sent/$total sites)"
+      else mail="FAILED"; _APPLY_MAIL_NOTE=" ($sent/$total sites; failed:$failed_sites)"; fi
+    else
+      if _apply_test_mail "$t" "$root" "$_AP_CLIENT"; then mail="sent"; else mail="FAILED"; fi
+    fi
   else
     mail="skipped (site does not boot)"
   fi
@@ -457,18 +641,19 @@ _apply_finish() { # normal|abort
   case "$state" in
     live)      end_txt="live (maintenance off)" ;;
     held)      end_txt="MAINTENANCE KEPT ON — the site does not work (clean 503 for visitors)" ;;
+    partial)   end_txt="PARTLY LIVE — held behind the 503: $(_apply_held_urls "$dir/verify.sites" "$_AP_HELD" | sed 's#^[a-z]*://##; s#/$##' | tr '\n' ' ' | sed 's/ *$//'); the rest is live" ;;
     stuck)     end_txt="MAINTENANCE STILL ON — could not be switched off (see command above)" ;;
     untouched) end_txt="production not modified (stopped before maintenance mode)" ;;
   esac
   case "$live" in
-    ok)       live_txt="all $(grep -c . "$urls" 2>/dev/null || echo 0) page(s) OK" ;;
-    problems) live_txt="PROBLEMS — $(grep -vc '^ok' "$dir/verify.txt" 2>/dev/null || echo '?') page(s) not OK (see verify.txt)" ;;
+    ok)       live_txt="$(grep -c '^ok' "$dir/verify.compare.txt" 2>/dev/null || grep -c . "$urls") page(s) OK$( n="$(grep -c '^unchanged' "$dir/verify.compare.txt" 2>/dev/null || true)"; [ "${n:-0}" -gt 0 ] && echo ", $n unchanged from before (not caused by the apply)")" ;;
+    problems) live_txt="PROBLEMS — $(grep -c '^broken' "$dir/verify.compare.txt" 2>/dev/null || grep -vc '^ok' "$dir/verify.txt") page(s) worked before and don't now (see verify.compare.txt)" ;;
     *)        live_txt="$live" ;;
   esac
   local summary
   summary="$(printf '\nFinal check (%s):\n  End state:   %s\n  Live check:  %s\n  Test mail:   %s%s\n  Updates:     %s\n  Rollback:    %s\n' \
     "$([ "$mode" = normal ] && echo "run completed" || echo "APPLY INCOMPLETE — aborted")" \
-    "$end_txt" "$live_txt" "$mail" "$([ -n "${_APPLY_MAIL_TO:-}" ] && [ "$mail" != skipped ] && echo " → $_APPLY_MAIL_TO")" \
+    "$end_txt" "$live_txt" "$mail" "${_APPLY_MAIL_NOTE:-}$([ -n "${_APPLY_MAIL_TO:-}" ] && [ "$mail" != skipped ] && echo " → $_APPLY_MAIL_TO")" \
     "$([ "$_AP_UPDATES_DONE" = 1 ] && { [ "$_AP_OK" = 1 ] && echo ok || echo "with problems (see update.log)"; } || echo "not completed")" \
     "${_AP_BACKUP:-(none taken)}")"
   printf '%s\n' "$summary" >&2
@@ -518,6 +703,16 @@ cmd_apply() {
 
   _WPSITE_RUN_CLIENT="$client"          # its hold list applies (preflight plan + updates)
 
+  # Multisite: every check below covers EVERY site of the network (boot checks, the
+  # sample pages, the per-site hold, a test mail per site).
+  local is_ms=0
+  _WPSITE_SITE_URLS=""
+  if [ "$(_prod_wp "$ssh_target" "$wp_root" eval 'echo is_multisite() ? 1 : 0;' </dev/null 2>/dev/null | tr -d '[:space:]' || true)" = "1" ]; then
+    is_ms=1
+    _WPSITE_SITE_URLS="$(_ms_site_urls _prod_wp "$ssh_target" "$wp_root")"
+    log_info "Multisite network: $(printf '%s\n' "$_WPSITE_SITE_URLS" | grep -c .) site(s) — each is checked; update-db runs --network."
+  fi
+
   # Preflight: everything checked BEFORE the backup, the confirmation, anything.
   if ! _apply_preflight "$client" "$ssh_target" "$wp_root"; then
     die "Not applying to '$client' — fix the preflight failures above first."
@@ -551,15 +746,12 @@ cmd_apply() {
   # Fresh update data first, so the before-snapshot (and thus the plan) isn't stale.
   _refresh_update_cache "$dir/update.log" _prod_wp "$ssh_target" "$wp_root"
   _prod_versions "$ssh_target" "$wp_root" "$dir" before
-  _apply_collect_verify_urls "$ssh_target" "$wp_root" "$dir/verify.urls"
+  _apply_collect_verify_urls "$ssh_target" "$wp_root" "$dir/verify.urls" "$client"
+  # Baseline: what every check page answers BEFORE anything changes — so the final check
+  # can tell "broken by the apply" from "always like that" (a hidden login page).
+  _apply_probe_all "$dir/verify.urls" "$dir/verify.before.txt" || true
 
-  # Multisite networks migrate every subsite's DB → need --network on update-db.
-  local is_ms=0
-  if [ "$(_prod_wp "$ssh_target" "$wp_root" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]' || true)" = "1" ]; then
-    is_ms=1
-    log_warn "Multisite network detected — update-db will run --network across all subsites."
-    log_warn "Note: the local rehearsal does not yet cover multisite — verify subsites by hand."
-  fi
+  [ "$is_ms" = 1 ] && _ms_active_snapshot "$dir" before _prod_wp "$ssh_target" "$wp_root"
 
   # 2) Maintenance mode on — and refuse to update production unprotected.
   log_info "[2/5] Maintenance mode ON..."
@@ -587,6 +779,10 @@ cmd_apply() {
   _classify_updates "$dir" "$client"
   _reconcile_active_plugins "$dir/plugins.before.csv" "$dir/plugins.after.csv" \
     "$dir/update.log" "$dir/plugins.reconcile.txt" _prod_wp "$ssh_target" "$wp_root" || _AP_OK=0
+  if [ "$is_ms" = 1 ]; then
+    _ms_active_snapshot "$dir" after _prod_wp "$ssh_target" "$wp_root"
+    _ms_reconcile_subsites "$dir" "$dir/update.log" "$dir/plugins.reconcile.txt" _prod_wp "$ssh_target" "$wp_root" || _AP_OK=0
+  fi
   _AP_UPDATES_DONE=1
 
   _apply_finish normal

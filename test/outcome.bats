@@ -164,3 +164,17 @@ _class() { awk -F'\t' -v n="$1" '$2==n {print $3; exit}' "$D/updates.outcome.tsv
   [[ "$output" != *"plugin:acme-custom"* ]]
   [[ "$output" == *"plugin:advanced-custom-fields-pro"* ]]
 }
+
+@test "packages.csv never stores the download URL (it can carry a licence token)" {
+  runner() {
+    case "$*" in
+      *update_package*) printf 'name,update,update_version,update_package\naule,available,2.3.82,https://aule-cloud.example/dl?token=SECRET123\nacf,available,6.8,\n' ;;
+      eval*WPSITE_BOOT_OK*) echo WPSITE_BOOT_OK ;;
+      *) : ;;
+    esac
+  }
+  _run_updates "$D" 0 runner 2>/dev/null || true
+  ! grep -rq SECRET123 "$D"
+  grep -qx 'aule,available,2.3.82,yes' "$D/plugins.packages.csv"
+  grep -qx 'acf,available,6.8,' "$D/plugins.packages.csv"
+}

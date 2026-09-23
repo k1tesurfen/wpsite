@@ -44,7 +44,8 @@ cmd_migrate_registry() {
   local c k v changes=0 moves=() regs=()
   while IFS= read -r c; do
     [ -n "$c" ] || continue
-    wclient_has "$c" || { regs+=("$c"); changes=$((changes + 1)); }
+    # Non-WordPress clients (no wp_root in mandos) are never wpsite clients.
+    if ! wclient_has "$c" && is_wordpress_client "$c"; then regs+=("$c"); changes=$((changes + 1)); fi
     for k in $WPSITE_MIGRATE_KEYS; do
       v="$(client_get "$c" "$k")"
       [ -n "$v" ] || continue

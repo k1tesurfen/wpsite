@@ -24,6 +24,9 @@ clients:
     wp_root: /var/www/newco
     remote_tmp: ~/.wpsite_tmp
     login_path: /geheim
+  plainsrv:
+    ssh: u@plain
+    port: "2222"
 EOF
   cat > "$WTEAM" <<EOF
 # team comment that must survive edits
@@ -71,7 +74,7 @@ EOF
 
 @test "clients = wpsite's registry; access = mandos; they are independent" {
   run config_clients;  [ "$output" = $'acme\norphan' ]
-  run access_clients;  [ "$output" = $'acme\nnewco' ]
+  run access_clients;  [ "$output" = $'acme\nnewco\nplainsrv' ]
   config_has_client orphan; ! access_has orphan      # in wpsite, no access
   access_has newco; ! config_has_client newco        # access, not in wpsite yet
 }
@@ -99,7 +102,7 @@ EOF
 
 @test "require_client: unknown-but-in-mandos points at backup; unknown everywhere says so" {
   run require_client newco
-  [ "$status" -ne 0 ]; [[ "$output" == *"wpsite backup newco"* ]]
+  [ "$status" -ne 0 ]; [[ "$output" == *"wpsite test newco"* ]]
   run require_client ghost
   [ "$status" -ne 0 ]; [[ "$output" == *"neither in wpsite nor in mandos"* ]]
   require_client acme
@@ -180,7 +183,7 @@ EOF
 
 @test "hold: invalid slug, unregistered client, and an unreachable registry are refused" {
   run cmd_hold acme 'bad slug';   [ "$status" -ne 0 ]
-  run cmd_hold newco some-plugin; [ "$status" -ne 0 ]; [[ "$output" == *"wpsite backup newco"* ]]
+  run cmd_hold newco some-plugin; [ "$status" -ne 0 ]; [[ "$output" == *"wpsite test newco"* ]]
   WPSITE_TEAM_CONFIG="$BATS_TEST_TMPDIR/unmounted/w.yml"
   run cmd_hold acme x;            [ "$status" -ne 0 ]
 }
@@ -229,7 +232,7 @@ EOF
   rm -rf "$(dirname "$WTEAM")"
   run cmd_migrate_registry --apply
   [ "$status" -eq 0 ]; [ -f "$WTEAM" ]
-  [ "$(config_clients | tr '\n' ' ')" = "acme newco " ]
+  [ "$(config_clients | tr '\n' ' ')" = "acme newco " ]   # plainsrv: not WordPress
 }
 
 @test "migrate-registry: drops stale access copies from a pre-mandos wpsite file, with a backup" {
@@ -252,4 +255,80 @@ EOF
   [ "$status" -eq 0 ]; [ "$output" = "newco" ]
   run cmd_list --names
   [ "$output" = $'acme\norphan' ]
+}
+
+# --- mandos wizard fields: port (only when not 22) + non-WordPress clients -------------
+
+@test "wpsite_ssh: passes -p only for a non-default port (mandos 'port')" {
+  ssh() { printf '%s\n' "$*" > "$BATS_TEST_TMPDIR/ssh.args"; }
+  _ssh_use_client acme; wpsite_ssh u@acme true
+  ! grep -q -- '-p' "$BATS_TEST_TMPDIR/ssh.args"
+  _ssh_use_client plainsrv; wpsite_ssh u@plain true
+  grep -q -- '-p 2222 u@plain true' "$BATS_TEST_TMPDIR/ssh.args"
+  _WPSITE_SSH_PORT=22; wpsite_ssh u@x true
+  ! grep -q -- '-p' "$BATS_TEST_TMPDIR/ssh.args"
+}
+
+@test "require_access: selects the client's port; refuses a non-WordPress client" {
+  require_access acme; [ -z "$_WPSITE_SSH_PORT" ]
+  run require_access plainsrv
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a WordPress client"* ]]
+}
+
+@test "backup: a non-WordPress mandos client is refused and never registered" {
+  source "$REPO/lib/cmd_backup.sh"
+  ssh_setup_mux() { :; }; ssh_close_mux() { :; }; _backup_cleanup() { :; }
+  _backup_one_client() { return 0; }
+  run cmd_backup plainsrv
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a WordPress client"* ]]
+  ! config_has_client plainsrv
+}
+
+@test "list --unregistered: non-WordPress clients are not wpsite candidates" {
+  source "$REPO/lib/cmd_list.sh"
+  run cmd_list --unregistered
+  [ "$output" = "newco" ]
+}
+
+# --- `wpsite test` registers too (workflow: mandos client add → wpsite test) ----------
+
+_stub_test_remote() { # pass|fail
+  source "$REPO/lib/cmd_test.sh"
+  ssh_setup_mux() { :; }; ssh_close_mux() { :; }; _remote_wp_prepare() { :; }
+  TEST_MODE="$1"
+  wpsite_ssh() { shift; case "$*" in
+    *SSH_OK*)       echo SSH_OK ;;
+    *"for cmd in"*) printf 'tar: OK\nphp: OK\nmysql: OK\nmysqldump: OK\n' ;;
+    *"[ -d "*)      [ "$TEST_MODE" = pass ] ;;
+    *"which wp"*)   echo /usr/local/bin/wp ;;
+    *"core version"*) [ "$TEST_MODE" = pass ] && echo 7.1.2 ;;
+  esac; }
+}
+
+@test "test: a PASSING test registers a mandos-only client" {
+  _stub_test_remote pass
+  run cmd_test newco
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"Registered 'newco' in wpsite"* ]]
+  [[ "$output" == *"Next: wpsite backup newco"* ]]
+  config_has_client newco
+}
+
+@test "test: a FAILING test registers nothing" {
+  _stub_test_remote fail
+  run cmd_test newco
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"was NOT registered"* ]]
+  ! config_has_client newco
+}
+
+@test "test: an already registered client stays as it is; non-WordPress and unknown are refused" {
+  _stub_test_remote pass
+  run cmd_test acme
+  [ "$status" -eq 0 ]; [[ "$output" != *"Registered"* ]]
+  run cmd_test plainsrv
+  [ "$status" -ne 0 ]; [[ "$output" == *"not a WordPress client"* ]]
+  ! config_has_client plainsrv
+  run cmd_test ghost
+  [ "$status" -ne 0 ]; [[ "$output" == *"neither in wpsite nor in mandos"* ]]
 }

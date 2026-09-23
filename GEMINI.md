@@ -9,7 +9,7 @@ Instructional context and architecture guide for the `wpsite` project.
 `wpsite` is a Bash-based CLI tool designed to backup WordPress sites over SSH and rebuild near-perfect local replicas under Docker (optimized for macOS + Homebrew). 
 
 ### Main Concepts & Architecture
-* **Depends on `mandos`**: A separate internal Go CLI (`~/git/mandos`) owns **client identity** (the shared `clients:` registry on Google Drive), **SSH-key onboarding**, and **Google Drive paths**. `wpsite` shells out to it (`MANDOS_BIN`, default `mandos`) and no longer stores clients or `cloud_base` itself. Configure a machine once with `mandos config init`.
+* **Depends on `mandos` for ACCESS only**: a separate internal Go CLI (`~/git/mandos`), the keyholder — per client `ssh`, `wp_root`, the Drive project folder, plus SSH-key onboarding and `cloud_base`. `wpsite` shells out to it (`MANDOS_BIN`). Everything WordPress-specific lives in wpsite's OWN registry (`…/01_Global/wpsite/wpsite.team.yml`); the two share only the client ID. Configure a machine once with `mandos config init`.
 * **Low-Overhead Replica Storage**: Media uploads default to the real files. Pass `--light` to instead fetch only image/video dimensions from production and procedurally generate layout-accurate blank placeholders locally (ImageMagick + `ffmpeg`). (`--full` is accepted as a no-op for back-compat.)
 * **Centralized Reverse Proxy**: Replicas run simultaneously on dedicated local domains (e.g., `http://<client>.test`) mapped through a shared Traefik reverse proxy. No per-replica port collisions.
 * **Wildcard DNS**: Avoids per-build `sudo` hosts file modifications by optionally routing `*.test` to `127.0.0.1` locally via `dnsmasq`.
@@ -152,4 +152,5 @@ clients:
   ```
 * Access (ssh, wp_root, keys) is mandos's: `mandos client add/set/unset/remove/setup-key`.
   WordPress settings live in wpsite's own registry (`wpsite show|hold|manual|forget`);
-  a client joins wpsite with its first `wpsite backup`. The two are not linked.
+  a client joins wpsite with a passing `wpsite test` (or its first `wpsite backup`).
+  The two are not linked.

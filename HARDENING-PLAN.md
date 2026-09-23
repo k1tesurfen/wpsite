@@ -78,6 +78,8 @@ Guiding rules:
 
 ### 1.3 Lifecycle — not linked
 - A mandos client is **not** automatically a wpsite client.
+- **[changed later]** a PASSING `wpsite test <c>` registers too (the usual workflow is
+  `mandos client add` → `wpsite test`); a failing test registers nothing.
 - **Only `wpsite backup <c>` registers** an ID that mandos knows and wpsite doesn't
   ("gerfin is new in wpsite — registered"). Every other command on an unknown ID refuses with
   "not in wpsite yet — run `wpsite backup <c>` first".

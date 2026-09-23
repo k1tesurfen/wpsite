@@ -194,8 +194,8 @@ _yq() { yq -r "$1 // \"\"" "$WPSITE_CONFIG"; }
 #   wpsite — its OWN shared file on the Drive (wpsite.team.yml), keyed by client ID:
 #            everything WordPress/maintenance-specific (hold lists, deactivate lists,
 #            review pages, remote_tmp, local_host, login_path, …). Read via wclient_*.
-# A client is "in wpsite" only once registered here; only `wpsite backup <c>` registers
-# an ID that mandos knows (see _backup_register). Deleting a client in mandos never
+# A client is "in wpsite" only once registered here; only a PASSING `wpsite test <c>` or
+# a successful `wpsite backup <c>` registers an ID that mandos knows. Deleting a client in mandos never
 # touches wpsite — the client then simply has no production access.
 # ---------------------------------------------------------------------------
 
@@ -234,13 +234,30 @@ client_unset()    { _mandos client unset "$1" "$2"; }
 access_clients()  { _mandos client list 2>/dev/null || true; }
 access_has()      { _mandos client has "$1" >/dev/null 2>&1; }
 
-# Production access for <client>: mandos must know it. Used by every command that
-# reaches the server (backup, apply, test, redirect).
+# Production access for <client>: mandos must know it, and it must be a WordPress site.
+# Used by every command that reaches the server (backup, apply, test, redirect). Also
+# selects the client's SSH port for every following wpsite_ssh call (_ssh_use_client).
 require_access() { # client
   local c="$1"
   [ -n "$c" ] || die "No client specified."
   have "$MANDOS_BIN" || die "mandos is not installed — production access needs it (see: wpsite doctor)."
   access_has "$c" || die "No production access for '$c' in mandos (add it with: mandos client add $c)."
+  is_wordpress_client "$c" || die "'$c' is not a WordPress client (no wp_root in mandos) — wpsite doesn't manage it. (Set one with: mandos client edit $c)"
+  _ssh_use_client "$c"
+}
+
+# A client mandos marks as NOT a WordPress site has no wp_root (the add wizard's "Is this
+# a WordPress site? → no"). wpsite leaves such clients alone: never registered, never
+# backed up, never listed as a candidate.
+is_wordpress_client() { [ -n "$(client_get "$1" wp_root)" ]; }
+
+# The SSH port for the client whose server we talk to next. mandos stores `port` only
+# when it isn't 22, so this is almost always empty (= ssh's default). One client per
+# call path (backup --all switches per client), so a plain global is enough.
+_WPSITE_SSH_PORT=""
+_ssh_use_client() { # client
+  _WPSITE_SSH_PORT="$(client_get "$1" port)"
+  return 0
 }
 
 # --- wpsite's own registry file -----------------------------------------------------
@@ -336,7 +353,7 @@ require_client() { # client_name
   [ -n "$c" ] || die "No client specified."
   wclient_has "$c" && return 0
   if access_has "$c"; then
-    die "'$c' is not in wpsite yet — register it with its first backup: wpsite backup $c"
+    die "'$c' is not in wpsite yet — register it with: wpsite test $c   (or its first backup)"
   fi
   die "Client '$c' not found (neither in wpsite nor in mandos)."
 }
@@ -451,6 +468,18 @@ client_domain() { # client
   local domain; domain="$(_cloud_domain_from_meta "$1")"
   [ -n "$domain" ] || domain="$1"
   printf '%s' "$domain"
+}
+
+# Every production domain of the client, one per line: a multisite network's sites (from
+# the newest backup's sites.csv, in blog order), else the one client_domain. Used by the
+# customer report, which must name EVERY site that was maintained.
+client_domains() { # client
+  local b; b="$(latest_backup_dir "$1" 2>/dev/null || true)"
+  if [ -n "$b" ] && grep -qx 'MULTISITE=1' "$b/meta.env" 2>/dev/null && [ -s "$b/sites.csv" ]; then
+    tail -n +2 "$b/sites.csv" | cut -d, -f2 | grep -E '^[A-Za-z0-9.-]+$' | awk '!seen[$0]++' || true
+    return 0
+  fi
+  client_domain "$1"; printf '\n'
 }
 
 # Backups live in a fixed subfolder INSIDE each domain's project folder — never at
@@ -676,6 +705,40 @@ target_local_host() { # name
 }
 
 # ---------------------------------------------------------------------------
+# WP-CLI output hygiene
+# ---------------------------------------------------------------------------
+# A noisy plugin makes WP-CLI print PHP diagnostics on STDOUT, in the middle of data —
+# weinwege: `multiple-domain-mapping-on-single-site` prints "Warning: Undefined array key
+# "HTTP_HOST"" (after an empty line) before every CSV header and URL list, so the
+# screenshot run got a page called "Warning:" and every CSV its header on line 3. A PHP
+# setting can't prevent it (WordPress/WP-CLI switch display_errors back at runtime), so
+# both WP-CLI runners (_upgrade_wp, _prod_wp) pass their output through this filter:
+# diagnostics — plus the empty line WP-CLI prints before them and a fatal's stack trace —
+# move to STDERR. Data captures (2>/dev/null) get clean data; logs (>>log 2>&1) keep the
+# lines; the fatal classification (_run_to merges stderr) still sees "Fatal error".
+_wp_diag_to_stderr() {
+  awk '
+    function diag(l) { return l ~ /^(<br \/>)?[[:space:]]*(<b>)?(PHP )?(Warning|Notice|Deprecated|Strict Standards|Fatal error|Parse error|Recoverable fatal error|Catchable fatal error)(<\/b>)?:/ }
+    hasheld { if (diag($0)) print held > "/dev/stderr"; else print held; hasheld = 0 }
+    diag($0) { print > "/dev/stderr"; trace = ($0 ~ /[Ff]atal error/); next }
+    trace && /^(PHP )?(Stack trace:|#[0-9]+ |  thrown in )/ { print > "/dev/stderr"; next }
+    { trace = 0 }
+    /^[[:space:]]*$/ { held = $0; hasheld = 1; next }   # held: goes wherever the NEXT line goes
+    { print }
+    END { if (hasheld) print held }
+  '
+}
+
+# Run a WP-CLI invocation through _wp_diag_to_stderr, keeping its exit status. The status
+# travels through a file (a DEBUG trap — bats has one — clobbers PIPESTATUS).
+_wp_filtered() { # cmd...
+  local rcf rc; rcf="$(mktemp)"
+  { local r=0; "$@" || r=$?; echo "$r" > "$rcf"; } | _wp_diag_to_stderr
+  rc="$(cat "$rcf" 2>/dev/null || echo 1)"; rm -f "$rcf"
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # SSH with connection multiplexing (one auth, reused across calls)
 # ---------------------------------------------------------------------------
 
@@ -688,12 +751,17 @@ ssh_setup_mux() {
   chmod 700 "$WPSITE_SSH_CONTROL_DIR"
 }
 
-# wpsite_ssh <ssh_target> [ssh args...]
+# wpsite_ssh <ssh_target> [ssh args...] — every production SSH call goes through here.
+# A non-default port (mandos `port`, selected by _ssh_use_client) becomes -p; the mux
+# ControlPath's %C hash includes the port, so connections never get mixed up.
 wpsite_ssh() {
   local target="$1"; shift
+  local port_opt=()
+  [ -n "${_WPSITE_SSH_PORT:-}" ] && [ "$_WPSITE_SSH_PORT" != 22 ] && port_opt=(-p "$_WPSITE_SSH_PORT")
   ssh -o ControlMaster=auto \
       -o ControlPath="$WPSITE_SSH_CONTROL_DIR/%C" \
       -o ControlPersist=120 \
+      ${port_opt[@]+"${port_opt[@]}"} \
       "$target" "$@"
 }
 

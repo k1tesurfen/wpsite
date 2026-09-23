@@ -5,9 +5,10 @@
 
 # wp-cli in a client's app container. Runs without --skip-plugins/--skip-themes
 # to ensure third-party update-checkers boot fully and capture premium updates.
+# stdout is DATA: PHP diagnostics from noisy plugins are moved to stderr (_wp_filtered).
 _upgrade_wp() { # app_container args...
   local app="$1"; shift
-  docker exec "$app" php -d memory_limit=512M -d max_execution_time=300 /usr/local/bin/wp --allow-root --path=/var/www/html "$@"
+  _wp_filtered docker exec "$app" php -d memory_limit=512M -d max_execution_time=300 /usr/local/bin/wp --allow-root --path=/var/www/html "$@"
 }
 
 # --- Active-plugin reconciliation -------------------------------------------
@@ -205,9 +206,10 @@ _plugin_update_skip_reason() { # slug
   case "$1" in
     # Premium: its updater needs a logged-in user and the credentials rotate.
     wp-staging-pro) printf 'premium, no auto-update' ;;
-    # Our own plugin: we ship it ourselves (wpsite inject / by hand), so an updater
-    # run would at best be a no-op and at worst overwrite it with an unrelated
-    # wp.org plugin that happens to share the slug.
+    # Our own plugin, in rapid development: aule-cloud offers every site the newest
+    # release, but new versions have large feature-compatibility gaps and would break
+    # sites built a few months earlier. The maintainer updates each site by hand, so an
+    # automatic update is exactly what must never happen — in upgrade AND apply.
     aule)           printf 'our own plugin, updated by hand' ;;
   esac
   return 0
@@ -306,9 +308,126 @@ _WPSITE_STEP_HOOK=""
 _update_step_done() { [ -z "$_WPSITE_STEP_HOOK" ] || "$_WPSITE_STEP_HOOK" || true; return 0; }
 
 # Does the site still boot? `wp eval` loads every active plugin, so a fatal surfaces here.
+# On a MULTISITE, _WPSITE_SITE_URLS (one site URL per line, set by upgrade/apply via
+# _ms_site_urls) makes it boot EVERY site (`--url=`): a plugin active on one subsite only
+# loads there, and a fatal in it would otherwise be invisible. _WPSITE_BOOT_FAILED names
+# the first site that failed.
+_WPSITE_SITE_URLS=""
+_WPSITE_BOOT_FAILED=""
 _site_boots() { # runner...
-  "$@" eval 'echo "WPSITE_BOOT_OK";' 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK
+  _WPSITE_BOOT_FAILED=""
+  if [ -z "$_WPSITE_SITE_URLS" ]; then
+    "$@" eval 'echo "WPSITE_BOOT_OK";' 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK
+    return
+  fi
+  local u
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    if ! "$@" eval 'echo "WPSITE_BOOT_OK";' --url="$u" 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK; then
+      _WPSITE_BOOT_FAILED="$u"
+      return 1
+    fi
+  done <<< "$_WPSITE_SITE_URLS"
+  return 0
 }
+
+# --- Multisite: the network's sites ----------------------------------------------------
+
+# Every site URL of a multisite network, main site first (blog_id order), one per line.
+# URL-shaped lines only (a noisy plugin must never become a "site").
+_ms_site_urls() { # runner...
+  "$@" site list --field=url --orderby=blog_id 2>/dev/null < /dev/null | tr -d '\r' \
+    | grep -E '^https?://[^[:space:]]+$' || true
+  return 0
+}
+
+# "blog_id<TAB>url" for every site (apply's per-site maintenance hold needs the IDs).
+_ms_site_map() { # runner...
+  "$@" site list --fields=blog_id,url --format=csv 2>/dev/null < /dev/null | tr -d '\r' \
+    | awk -F, '$1 ~ /^[0-9]+$/ && $2 ~ /^https?:\/\// { print $1 "\t" $2 }' || true
+  return 0
+}
+
+# Legal pages rarely carry risky features (sliders, forms, shops) — the sample page for a
+# site is never one of them. Matched against the URL's last path segment.
+WPSITE_LEGAL_SLUGS='impressum|imprint|agb|datenschutz[a-z0-9-]*|privacy[a-z0-9-]*|terms[a-z0-9-]*|nutzungsbedingungen|cookie[a-z0-9-]*|widerruf[a-z0-9-]*|disclaimer|haftungsausschluss|rechtliche-hinweise|legal[a-z0-9-]*|barrierefreiheit|accessibility'
+_is_legal_url() { # url
+  local p="${1%/}"; p="${p##*/}"
+  printf '%s' "$p" | grep -qiE "^($WPSITE_LEGAL_SLUGS)$"
+}
+
+# Up to <n> published, non-legal pages of one site (pages by menu order first, then posts),
+# excluding the home page itself. Empty when the site has none.
+_sample_pages() { # n site_url runner...
+  local n="$1" site="$2"; shift 2
+  local home="${site%/}" u c=0
+  { "$@" post list --url="$site" --post_type=page --post_status=publish --orderby=menu_order \
+      --order=ASC --posts_per_page=30 --field=url 2>/dev/null < /dev/null
+    "$@" post list --url="$site" --post_type=post --post_status=publish \
+      --posts_per_page=10 --field=url 2>/dev/null < /dev/null; } | tr -d '\r' \
+  | grep -E '^https?://[^[:space:]]+$' | while IFS= read -r u; do
+      [ "${u%/}" = "$home" ] && continue
+      _is_legal_url "$u" && continue
+      printf '%s\n' "$u"; c=$((c + 1))
+      if [ "$c" -ge "$n" ]; then break; fi   # NOT `[ … ] && break`: a false test as the loop's
+    done || true                             # last command fails the pipeline under set -e
+  return 0
+}
+
+# --- Multisite: plugins active on ONE subsite -------------------------------------------
+# The main before/after CSVs only show the main site's activation state, so a plugin
+# active on a single subsite that an update knocks out went unnoticed. Snapshot each
+# subsite's site-level active plugins (network-active ones are the main CSV's job).
+_ms_active_snapshot() { # dir suffix runner...
+  local dir="$1" sfx="$2"; shift 2
+  [ -n "$_WPSITE_SITE_URLS" ] || return 0
+  local u label first=1
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    if [ "$first" = 1 ]; then first=0; continue; fi      # the main site: covered by the CSV
+    label="$(printf '%s' "${u#*://}" | tr -c '[:alnum:]\n' '_')"
+    "$@" plugin list --url="$u" --status=active --field=name 2>/dev/null < /dev/null | tr -d '\r' \
+      | grep -E '^[A-Za-z0-9._-]+$' > "$dir/active.$label.$sfx" || true
+    printf '%s\n' "$u" > "$dir/active.$label.url"
+  done <<< "$_WPSITE_SITE_URLS"
+  return 0
+}
+
+# Reactivate subsite plugins that fell inactive, each with a boot check ON THAT SITE;
+# a plugin that fatals there is deactivated again. Appends "<result>\t<name> (<host>)\t…"
+# to <outfile> (same format as _reconcile_active_plugins). Non-zero if any couldn't be restored.
+_ms_reconcile_subsites() { # dir logfile outfile runner...
+  local dir="$1" logf="$2" outf="$3"; shift 3
+  [ -n "$_WPSITE_SITE_URLS" ] || return 0
+  local failed=0 before label url name host
+  for before in "$dir"/active.*.before; do
+    [ -f "$before" ] || continue
+    label="${before#"$dir"/active.}"; label="${label%.before}"
+    url="$(cat "$dir/active.$label.url" 2>/dev/null || true)"; [ -n "$url" ] || continue
+    host="${url#*://}"; host="${host%%/*}"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      grep -qxF "$name" "$dir/active.$label.after" 2>/dev/null && continue
+      log_warn "  $name went INACTIVE on $host during the update — reconciling..."
+      printf '\n--- reconcile: activating %s on %s ---\n' "$name" "$url" >> "$logf"
+      if ! "$@" plugin activate "$name" --url="$url" >> "$logf" 2>&1 < /dev/null; then
+        printf 'FAILED\t%s (%s)\tactivation refused — see update.log\n' "$name" "$host" >> "$outf"
+        failed=1; continue
+      fi
+      if "$@" eval 'echo "WPSITE_BOOT_OK";' --url="$url" 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK; then
+        printf 'REACTIVATED\t%s (%s)\tno error on boot\n' "$name" "$host" >> "$outf"
+        log_ok "  $name: reactivated on $host (site still boots)"
+      else
+        "$@" plugin deactivate "$name" --url="$url" --skip-plugins >> "$logf" 2>&1 < /dev/null || true
+        printf 'FAILED\t%s (%s)\tfatal error on boot — left DEACTIVATED\n' "$name" "$host" >> "$outf"
+        log_error "  $name: fatals on $host — left deactivated there, investigate by hand"
+        failed=1
+      fi
+    done < "$before"
+  done
+  [ "$failed" = 0 ]
+}
+
 
 # Set by _run_updates when it stopped because the site no longer boots.
 _WPSITE_UPDATES_BROKEN=0
@@ -346,9 +465,13 @@ _run_updates() { # dir is_multisite runner...
   for kind in plugin theme; do
     log_info "Updating ${kind}s..."
     # What WordPress knows BEFORE updating (an empty update_package = no download link —
-    # licence/pro/custom): kept for the classification, see _classify_updates.
+    # licence/pro/custom): kept for the classification, see _classify_updates. Only WHETHER
+    # a package exists is stored ("yes"/empty) — the URL itself often carries a licence or
+    # download token (aule-cloud, premium updaters) and must never land in local reports.
     "$@" "$kind" list --fields=name,update,update_version,update_package --format=csv \
-      2>/dev/null < /dev/null | tr -d '\r' > "$dir/${kind}s.packages.csv" || true
+      2>/dev/null < /dev/null | tr -d '\r' \
+      | awk -F, 'BEGIN { OFS = "," } $1 != "name" && $4 != "" { $4 = "yes"; NF = 4 } { print }' \
+      > "$dir/${kind}s.packages.csv" || true
     : > "$dir/${kind}s.attempts.tsv"
     list="$(_update_plan "$kind" "$dir/${kind}s.before.csv" "$logf" "$@")"
     [ -n "$list" ] || log_info "  All ${kind}s already up to date."
@@ -373,7 +496,7 @@ _run_updates() { # dir is_multisite runner...
         _update_step_done
         if ! _site_boots "$@"; then
           _ulog_note "$logf" "STOP: site does not boot after '$kind update $x' — no further updates run"
-          log_error "The site does not boot after updating $x — stopping all further updates."
+          log_error "The site${_WPSITE_BOOT_FAILED:+ $_WPSITE_BOOT_FAILED} does not boot after updating $x — stopping all further updates."
           _WPSITE_UPDATES_BROKEN=1; return 2
         fi
         _ulog_note "$logf" "boot check after failed '$kind update $x': site still boots — continuing"
@@ -567,6 +690,19 @@ _report_missed_updates() { # dir
 
 # Renders the customer-facing report. $1 is the SITE LABEL shown to the customer
 # (the domain — see _write_client_report_de), never the internal client id.
+# "• Website: x" — or, for several domains (a multisite network), "• Websites:" with one
+# domain per line, aligned with the other PROJEKT-DETAILS rows.
+_report_site_lines() { # sites (newline-separated)
+  local n; n="$(printf '%s\n' "$1" | grep -c .)"
+  if [ "$n" -le 1 ]; then printf '  • Website:            %s' "$(printf '%s' "$1" | head -1)"; return 0; fi
+  # Values start in column 24, like "  • Website:            x". The label is ASCII, so
+  # its length pads correctly (printf %-Ns would miscount the multibyte bullet).
+  local label="Websites ($n):"
+  printf '  • %s%*s' "$label" "$((20 - ${#label}))" ''
+  printf '%s\n' "$1" | grep . | awk 'NR == 1 { printf "%s", $0; next } { printf "\n                        %s", $0 }'
+  return 0
+}
+
 _client_report_de() { # site stamp core_before core_after dir
   local site="$1" stamp="$2" cb="$3" ca="$4" dir="$5"
   local formatted_date
@@ -585,7 +721,7 @@ _client_report_de() { # site stamp core_before core_after dir
 --------------------------------------------------------------------------------
 PROJEKT-DETAILS
 --------------------------------------------------------------------------------
-  • Website:            $site
+$(_report_site_lines "$site")
   • Zeitpunkt:          $formatted_date
   • Status nach Update: Aktiv und stabil (HTTP 200)
 
@@ -660,8 +796,14 @@ _write_client_report_de() { # client stamp core_before core_after dir [mode]
   local client="$1" stamp="$2" cb="$3" ca="$4" dir="$5" mode="${6:-}"
   local site base
   if [ "$mode" = domain ]; then
-    site="$(client_domain "$client")"
-    base="$(printf '%s' "$site" | tr '.' '_')-wartungsbericht"
+    # Every domain of the site (a multisite network lists all of them). The FILE is named
+    # after the client's live domain from mandos when set — a network's main site is
+    # often a staging-looking address (schatz: schatzgruppe-site.wird.cool) that must not
+    # end up in a customer's file name — else after the first domain.
+    site="$(client_domains "$client")"
+    local fname; fname="$(client_get "$client" domain)"
+    [ -n "$fname" ] || fname="$(printf '%s\n' "$site" | head -1)"
+    base="$(printf '%s' "$fname" | tr '.' '_')-wartungsbericht"
   else
     site="$client"
     base="wartungsbericht"
@@ -704,7 +846,7 @@ cmd_upgrade() {
     local u s
     if [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
       # Multisite: home + 1 page per subsite, slugs namespaced; shoot every subsite host.
-      while IFS= read -r s; do [ -n "$s" ] && specs+=("$s"); done < <(_ms_review_specs "$app_c")
+      while IFS= read -r s; do [ -n "$s" ] && specs+=("$s"); done < <(_ms_review_specs "$app_c" "$client")
     else
       local local_host local_url
       local_host="$(client_local_host "$client")"
@@ -727,6 +869,14 @@ cmd_upgrade() {
   # --- Upgrades (the version diff is the source of truth, so warn-don't-die) ---
   local is_ms=0
   [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ] && is_ms=1
+  # Multisite: boot checks cover EVERY site, and each subsite's own active plugins are
+  # snapshotted (a plugin active on one subsite only is invisible in the main CSV).
+  _WPSITE_SITE_URLS=""
+  if [ "$is_ms" = 1 ]; then
+    _WPSITE_SITE_URLS="$(_ms_site_urls _upgrade_wp "$app_c")"
+    log_info "Multisite network: $(printf '%s\n' "$_WPSITE_SITE_URLS" | grep -c .) site(s) — every one is boot-checked."
+    _ms_active_snapshot "$dir" before _upgrade_wp "$app_c"
+  fi
   _WPSITE_RUN_CLIENT="$client"          # its hold list applies
   _run_updates "$dir" "$is_ms" _upgrade_wp "$app_c" || true
 
@@ -743,6 +893,10 @@ cmd_upgrade() {
   local reconcile_ok=1
   _reconcile_active_plugins "$dir/plugins.before.csv" "$dir/plugins.after.csv" \
     "$dir/update.log" "$dir/plugins.reconcile.txt" _upgrade_wp "$app_c" || reconcile_ok=0
+  if [ "$is_ms" = 1 ]; then
+    _ms_active_snapshot "$dir" after _upgrade_wp "$app_c"
+    _ms_reconcile_subsites "$dir" "$dir/update.log" "$dir/plugins.reconcile.txt" _upgrade_wp "$app_c" || reconcile_ok=0
+  fi
 
   # --- Report ---
   echo >&2
@@ -768,6 +922,7 @@ cmd_upgrade() {
     _open_file "$dir/review.html"
   fi
 
+  _WPSITE_SITE_URLS=""
   # A plugin we could not bring back is the one outcome that must not be silent:
   # the same update is about to be replayed on production by `wpsite apply`.
   if [ "$reconcile_ok" != 1 ]; then

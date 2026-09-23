@@ -59,28 +59,48 @@ _review_pages() { # client app_container local_url
         esac
       done
     else
-      # page,post (page-only sites have no posts); --field=url gives raw URLs, no header.
-      _upgrade_wp "$app" post list --post_type=page,post --post_status=publish \
-        --posts_per_page=8 --field=url 2>/dev/null | tr -d '\r'
+      # Published pages (by menu order) then posts, never a legal page — impressum/agb/
+      # datenschutz rarely carry the risky stuff (sliders, forms, shops).
+      _sample_pages 7 "$url" _upgrade_wp "$app"
     fi
-  } | awk 'NF && !seen[$0]++' | head -8
+  } | grep -E '^https?://[^[:space:]]+$' \
+    | awk -v host="$(_review_host "$url")" '
+        # Only pages OF THE REPLICA. A domain-mapping plugin (weinwege) returns pages under
+        # other live domains the build did not rewrite — screenshotting those would hit
+        # PRODUCTION and compare nothing. Dropped, and counted on stderr.
+        seen[$0]++ { next }
+        { h = $0; sub(/^https?:\/\//, "", h); sub(/[\/?#:].*$/, "", h) }
+        h != host { skipped++; next }
+        { print }
+        END { if (skipped) printf "  (skipped %d page(s) on other domains — domain mapping?)\n", skipped > "/dev/stderr" }' \
+    | head -8 || true
 }
 
-# Multisite review specs: home + 1 published page PER subsite (your 2-pages-each rule).
-# Subsite list comes from the running replica (its DB already holds the .test URLs).
-# Slugs are namespaced by host (`greyda_artismedia_test__home`) so they never collide
-# across sites — `home`/`home` would otherwise overwrite one PNG. Prints "slug|url".
-_ms_review_specs() { # app_container
-  local app="$1" site_url host label extra
-  _upgrade_wp "$app" site list --field=url 2>/dev/null | tr -d '\r' \
-  | while IFS= read -r site_url; do
-      [ -n "$site_url" ] || continue
+# The host part of a URL (no scheme, path, port).
+_review_host() { local h="${1#*://}"; h="${h%%/*}"; printf '%s' "${h%%:*}"; }
+
+# Multisite review specs: for EVERY site of the network its home page plus one sample
+# page (published, never a legal page — _sample_pages). A client's review_pages paths
+# (wpsite registry) are shot on every site too. Slugs are namespaced by host
+# (`greyda_artismedia_test__home`) so they never collide across sites, and the review
+# page groups them per site. Prints "slug|url".
+_ms_review_specs() { # app_container [client]
+  local app="$1" client="${2:-}" site_url host label page configured="" p
+  [ -n "$client" ] && configured="$(wclient_get "$client" review_pages)"
+  _ms_site_urls _upgrade_wp "$app" | while IFS= read -r site_url; do
       host="${site_url#*://}"; host="${host%%/*}"
       label="$(printf '%s' "$host" | tr -c '[:alnum:]' '_')"
       printf '%s|%s\n' "${label}__home" "$site_url"
-      extra="$(_upgrade_wp "$app" post list --url="$site_url" --post_type=page,post \
-        --post_status=publish --posts_per_page=1 --field=url 2>/dev/null | tr -d '\r' | head -1)"
-      [ -n "$extra" ] && printf '%s|%s\n' "${label}__$(_url_slug "$extra")" "$extra"
+      if [ -n "$configured" ]; then
+        printf '%s\n' "$configured" | while IFS= read -r p; do
+          [ -n "$p" ] || continue
+          p="/${p#/}"; page="${site_url%/}$p"
+          printf '%s|%s\n' "${label}__$(_url_slug "$page")" "$page"
+        done
+      else
+        page="$(_sample_pages 1 "$site_url" _upgrade_wp "$app")"
+        [ -n "$page" ] && printf '%s|%s\n' "${label}__$(_url_slug "$page")" "$page"
+      fi
     done
   return 0
 }
@@ -217,12 +237,29 @@ h1{font-size:16px;margin:0}.meta{color:#9aa0a6;font-size:13px;margin-top:4px}
 .side{display:none;gap:12px}.side>div{flex:1;min-width:0}.side .cap{font-size:11px;color:#9aa0a6;margin-bottom:4px}
 .side img{width:100%;display:block;border:1px solid #2a2d33;border-radius:8px}
 .page.sbs .cmp{display:none}.page.sbs .side{display:flex}
+nav.sites{max-width:1480px;margin:16px auto 0;padding:0 20px;font-size:13px;color:#9aa0a6}
+nav.sites a{color:#7aa2f7;margin-left:10px;text-decoration:none}
+h2.site{max-width:1480px;margin:44px auto 0;padding:12px 20px 0;font-size:18px;color:#fff;border-top:1px solid #2a2d33;scroll-margin-top:70px}
 </style></head><body>
 <header><h1>wpsite review — $client</h1>
 <div class="meta">$stamp · before / after side by side · toggle any page to the wipe slider</div></header>
 HEAD
+    # Several hosts (a multisite): a jump list, and a heading whenever the site changes.
+    local hosts=() host last="" h
+    for spec in "$@"; do h="${spec#*|}"; h="${h#*://}"; h="${h%%/*}"
+      case " ${hosts[*]-} " in *" $h "*) ;; *) hosts+=("$h") ;; esac; done
+    if [ "${#hosts[@]}" -gt 1 ]; then
+      printf '<nav class="sites">%s sites:' "${#hosts[@]}"
+      for h in "${hosts[@]}"; do printf ' <a href="#site-%s">%s</a>' "$(printf '%s' "$h" | tr -c '[:alnum:]' '-')" "$h"; done
+      printf '</nav>\n'
+    fi
     for spec in "$@"; do
       slug="${spec%%|*}"; url="${spec#*|}"
+      host="${url#*://}"; host="${host%%/*}"
+      if [ "${#hosts[@]}" -gt 1 ] && [ "$host" != "$last" ]; then
+        printf '<h2 class="site" id="site-%s">%s</h2>\n' "$(printf '%s' "$host" | tr -c '[:alnum:]' '-')" "$host"
+        last="$host"
+      fi
       cat <<SECTION
 <div class="page sbs">
   <span class="toggle" onclick="toggle(this)">side by side ⇄ slider</span>

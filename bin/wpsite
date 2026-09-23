@@ -40,7 +40,7 @@ Commands:
   setup               Onboard this machine: write base_dir to the local config and
                       check that both registries (mandos access + wpsite's own) are
                       reachable. SSH keys are mandos's job: mandos client setup-key
-  backup  <client>    Snapshot a remote site (real media by default). The first
+  backup  <client>    Snapshot a remote site (real media by default). A successful
                       backup of a client mandos knows registers it in wpsite.
           --all       …back up every configured client, in sequence
           --light     …use blank placeholder media instead of real files (smaller)
@@ -86,6 +86,8 @@ Commands:
                       confirmation → fresh backup → maintenance → updates → final check
                       (live pages + test mail) on EVERY exit. Irreversible — rehearse first.
           --check         …run only the preflight (read-only; e.g. before a round)
+  maintenance <client> [off|status]   The maintenance lock apply sets on PRODUCTION:
+                      status (default) = lock files + what visitors see; off = lift it
   report  <client> [<id>]   Regenerate a maintenance report's PDF from its .txt
                       (edit the .txt first; newest apply by default)
           --upgrade <id> --list --no-open
@@ -110,7 +112,9 @@ Commands:
           --backups <c>   …complete backup ids for a client, newest first (machine-readable)
   status              Show running replicas + dev sites and their URLs
   doctor              Verify dependencies and environment
-  test    <client>    Verify remote host connection, directories, and CLI/DB readiness
+  test    <client>    Verify remote host connection, directories, and CLI/DB readiness.
+                      A passing test of a client mandos knows registers it in wpsite
+                      (the usual step after: mandos client add <client>)
 
 Global flags:
   -v, --verbose       Verbose logging
@@ -141,7 +145,7 @@ main() {
   # command on the wrong machine at 11pm — NOT a security control: the real boundary is
   # that a dev box holds no production credential at all. See DEVBOX-PLAN.md §5.10.
   case "$cmd" in
-    apply|redirect|backup|push|test|prune|forget|hold|manual|migrate-registry)
+    apply|redirect|backup|push|test|prune|forget|hold|manual|migrate-registry|maintenance)
       if [ "$(config_role 2>/dev/null || true)" = "dev" ]; then
         die "'$cmd' is a gateway command, and this machine is configured as role=dev.
   Run it on the gateway — the machine holding the production SSH keys and Drive.
@@ -168,6 +172,7 @@ main() {
     review)  cmd_review "$@" ;;
     apply)   cmd_apply "$@" ;;
     report)  cmd_report "$@" ;;
+    maintenance) cmd_maintenance "$@" ;;
     redirect) cmd_redirect "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;

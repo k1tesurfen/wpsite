@@ -91,3 +91,33 @@ setup() {
   run _apply_preflight acme u@h "$ROOT"
   [ "$status" -ne 0 ]; [[ "$output" == *"SSH to u@h fails"* ]]
 }
+
+# Mittwald blocks `df` for the SSH user ("free space … unknown (df unavailable)" on
+# buymysite): PHP's disk_free_space() is the fallback, for the WP root and the staging dir.
+_no_df() { wpsite_ssh() { shift; bash -c "df() { return 1; }; $1"; }; }
+
+@test "df blocked: free space comes from PHP instead (WP root + staging dir)" {
+  _no_df
+  local inner; inner="$(declare -f _prod_wp)"
+  eval "_prod_wp() { case \"\$*\" in *disk_free_space*) echo 'FREEB 5368709120'; return 0 ;; esac; ${inner#*\{}"
+  run _apply_preflight acme u@h "$ROOT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"free space: 5120 MB (via PHP)"* ]]
+  [[ "$output" == *"(5120 MB free, via PHP)"* ]]
+}
+
+@test "df blocked and PHP can't tell either: unknown, informational only" {
+  _no_df
+  run _apply_preflight acme u@h "$ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unknown (neither df nor PHP can tell)"* ]]
+}
+
+@test "df blocked, PHP reports too little space: abort" {
+  _no_df
+  local inner; inner="$(declare -f _prod_wp)"
+  eval "_prod_wp() { case \"\$*\" in *disk_free_space*) echo 'FREEB 1048576'; return 0 ;; esac; ${inner#*\{}"
+  run _apply_preflight acme u@h "$ROOT"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"only 1 MB free on the WordPress filesystem (via PHP)"* ]]
+}

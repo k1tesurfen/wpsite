@@ -16,10 +16,12 @@ cmd_list() {
     return 0
   fi
   if [ "${1:-}" = "--unregistered" ]; then
+    # Non-WordPress clients (no wp_root in mandos) are never wpsite candidates.
     local reg; reg="$(config_clients)"
     access_clients | while IFS= read -r c; do
       [ -n "$c" ] || continue
-      printf '%s\n' "$reg" | grep -qxF "$c" || printf '%s\n' "$c"
+      printf '%s\n' "$reg" | grep -qxF "$c" && continue
+      is_wordpress_client "$c" && printf '%s\n' "$c"
     done
     return 0
   fi

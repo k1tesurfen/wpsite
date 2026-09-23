@@ -1,12 +1,23 @@
 # shellcheck shell=bash
 # wpsite test <client> — verify remote host connectivity, directories, and dependencies.
+#
+# Also one of the TWO ways a client joins wpsite (the other is `backup`): the usual
+# workflow is `mandos client add <c>` → `wpsite test <c>`. A client mandos knows but
+# wpsite doesn't is registered only when the test PASSES — a failing test registers
+# nothing (the registries stay unlinked until a check proves the site is workable).
 
 cmd_test() {
-  local client="${1:-}"
+  local client="${1:-}" new_client=0
   [ -n "$client" ] || die "Specify a <client> to test remote readiness."
   config_require_registry
-  require_client "$client"
+  if ! wclient_has "$client"; then
+    access_has "$client" || die "Client '$client' not found (neither in wpsite nor in mandos)."
+    new_client=1                          # require_access below refuses non-WordPress clients
+  else
+    require_client "$client"
+  fi
   require_access "$client"
+  [ "$new_client" = 1 ] && log_info "'$client' is new in wpsite — it is registered if this test passes."
 
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"
@@ -97,8 +108,13 @@ cmd_test() {
 
   if [ "$fail" = "0" ]; then
     log_ok "Remote server '$client' is 100% READY for backup and apply operations!"
+    if [ "$new_client" = 1 ]; then
+      wclient_register "$client"
+      log_ok "Registered '$client' in wpsite ($(wpsite_team_file)). Next: wpsite backup $client"
+    fi
     return 0
   else
+    [ "$new_client" = 1 ] && log_warn "'$client' was NOT registered in wpsite (the test failed)."
     die "Remote server '$client' has missing dependencies or connection issues (see above)."
   fi
 }

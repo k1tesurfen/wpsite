@@ -91,8 +91,8 @@ never propagated.
 
 - **Two registries, not linked:** mandos = access (ssh, wp_root, Drive folder, SSH keys);
   wpsite's own file on the Drive = WordPress settings per client (hold/manual lists,
-  deactivate list, …). A client mandos knows joins wpsite with its **first `wpsite
-  backup`**. A new machine runs `wpsite setup` (base_dir + mandos config); SSH keys come
+  deactivate list, …). A client mandos knows joins wpsite with a **passing `wpsite test`**
+  (or its first successful `wpsite backup`). A new machine runs `wpsite setup` (base_dir + mandos config); SSH keys come
   from `mandos client setup-key <client>` — wpsite never installs keys.
 - If someone reports *"no clients / team config unreachable"*, their **Google Drive isn't
   mounted** — the client definitions live there. Client edits also refuse to write when
@@ -147,11 +147,12 @@ wpsite upgrade <client> [--noreview]   # rehearse core/plugin/theme updates loca
 wpsite review  <client>                # re-open the latest before/after screenshot page
 wpsite apply   <client>                # run the rehearsed upgrade ON PRODUCTION (irreversible!)
 wpsite apply   <client> --check        # preflight only (read-only) — e.g. before a maintenance round
+wpsite maintenance <client> [off]      # status of apply's maintenance lock on production; off = lift it
 ```
 
 **Clients:**
 ```bash
-mandos client add <name> --ssh <u@h> --wp-root <p>   # ACCESS: onboard a client (mandos)
+mandos client add <name>               # ACCESS: guided wizard (mandos) — then wpsite backup <name>
 wpsite show   <client> [<key>]         # everything wpsite knows (+ its mandos access)
 wpsite hold   <client> [<slug> [--reason "…"] [--remove]]   # never auto-update this plugin/theme
 wpsite manual <client> [<item> …]      # reminder: update by hand in wp-admin (WP-CLI can't see it)
@@ -174,7 +175,7 @@ wpsite prune  <client> [<id>] [--keep N|--older-than Nd|--all] [--dry-run] [--ye
 ## Common workflows
 
 - **Onboard a client, then get a local copy:**
-  `mandos client add acme …` → `wpsite test acme` → `wpsite backup acme` (registers it) → `wpsite build acme`
+  `mandos client add acme` → `wpsite test acme` (registers it) → `wpsite backup acme` → `wpsite build acme`
   → open `http://acme.test`.
 - **Quick dev sandbox from a client (fast, small):**
   `wpsite clone acme acme-dev --light` — namespaced under `acme-dev.test`.

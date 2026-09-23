@@ -48,24 +48,28 @@ _backup_remote_script() {
     mkdir -p "$REMOTE_TMP" && chmod 700 "$REMOTE_TMP" || { echo "ERROR: cannot create staging dir $REMOTE_TMP" >&2; exit 1; }
 
     echo "Capturing site metadata..."
-    IS_MS="$(wp eval 'echo is_multisite() ? 1 : 0;' --allow-root 2>/dev/null | tr -d '[:space:]')"
+    # A noisy plugin can print PHP diagnostics on STDOUT (after an empty line) — they must
+    # never end up in meta.env / sites.csv. wpv = wp with those lines (and blanks) dropped.
+    _nodiag() { grep -vE '^[[:space:]]*$|^(<br />)?[[:space:]]*(<b>)?(PHP )?(Warning|Notice|Deprecated|Strict Standards|Fatal error|Parse error)(</b>)?:' || true; }
+    wpv() { wp "$@" 2>/dev/null | _nodiag; }
+    IS_MS="$(wpv eval 'echo is_multisite() ? 1 : 0;' --allow-root | tr -d '[:space:]')"
     [ "$IS_MS" = "1" ] || IS_MS=0
     {
-      echo "SOURCE_SITEURL=$(wp option get siteurl --allow-root 2>/dev/null)"
-      echo "SOURCE_HOME=$(wp option get home --allow-root 2>/dev/null)"
-      echo "WP_VERSION=$(wp core version --allow-root 2>/dev/null)"
-      echo "PHP_VERSION=$(wp eval 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' --allow-root 2>/dev/null)"
+      echo "SOURCE_SITEURL=$(wpv option get siteurl --allow-root | head -1)"
+      echo "SOURCE_HOME=$(wpv option get home --allow-root | head -1)"
+      echo "WP_VERSION=$(wpv core version --allow-root | head -1)"
+      echo "PHP_VERSION=$(wpv eval 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' --allow-root | head -1)"
       echo "BACKUP_MODE=${BACKUP_MODE:-placeholder}"
       echo "MULTISITE=$IS_MS"
       # Production table prefix (often customized on managed/hardened hosts, e.g.
       # 'hfm3_'). The replica's wp-config must match it or WP/wp-cli report the
       # install as missing and the URL rewrite silently does nothing.
-      echo "TABLE_PREFIX=$(wp config get table_prefix --allow-root 2>/dev/null)"
+      echo "TABLE_PREFIX=$(wpv config get table_prefix --allow-root | head -1)"
     } > "$REMOTE_TMP/meta.env"
     if [ "$IS_MS" = "1" ]; then
       echo "Multisite detected — recording the network (sites.csv)..."
-      echo "SUBDOMAIN_INSTALL=$(wp eval 'echo (defined("SUBDOMAIN_INSTALL") && SUBDOMAIN_INSTALL) ? 1 : 0;' --allow-root 2>/dev/null | tr -d '[:space:]')" >> "$REMOTE_TMP/meta.env"
-      wp site list --fields=blog_id,domain,path,url --format=csv --allow-root 2>/dev/null | tr -d '\r' > "$REMOTE_TMP/sites.csv"
+      echo "SUBDOMAIN_INSTALL=$(wpv eval 'echo (defined("SUBDOMAIN_INSTALL") && SUBDOMAIN_INSTALL) ? 1 : 0;' --allow-root | tr -d '[:space:]')" >> "$REMOTE_TMP/meta.env"
+      wpv site list --fields=blog_id,domain,path,url --format=csv --allow-root | tr -d '\r' > "$REMOTE_TMP/sites.csv"
     fi
 
     echo "Exporting database..."
@@ -173,6 +177,8 @@ _backup_one_client() { # client full_flag persist_flag
   local client="$1" full="$2" persist="${3:-0}"
 
   access_has "$client" || { log_error "$client: no production access in mandos (mandos client add $client)"; return 1; }
+  is_wordpress_client "$client" || { log_error "$client: not a WordPress client (no wp_root in mandos) — skipped"; return 1; }
+  _ssh_use_client "$client"
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"
   wp_root="$(client_get "$client" wp_root)"
@@ -363,6 +369,7 @@ cmd_backup() {
     # registered after its first successful backup (registries are not linked).
     if ! wclient_has "$client"; then
       access_has "$client" || die "Client '$client' not found (neither in wpsite nor in mandos)."
+      is_wordpress_client "$client" || die "'$client' is not a WordPress client (no wp_root in mandos) — wpsite doesn't manage it."
       new_client=1
       log_info "'$client' is new in wpsite — it is registered once this first backup succeeds."
     fi

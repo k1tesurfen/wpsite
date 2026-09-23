@@ -146,3 +146,60 @@ _runner_setup() { # boots_after_failure: 1|0
   _WPSITE_STEP_HOOK=""
   [ "$HOOKS" -ge 5 ]      # core, update-db, 2 plugins, 1 theme
 }
+
+# --- wpsite maintenance <client> [off|status] -------------------------------------------
+
+_cmd_world() {
+  command -v yq >/dev/null 2>&1 || skip "yq not installed"
+  CFG="$BATS_TEST_TMPDIR/wpsite.yml"
+  printf 'base_dir: %s/root\nclients:\n  acme:\n    ssh: u@acme\n    wp_root: %s\n' "$BATS_TEST_TMPDIR" "$ROOT" > "$CFG"
+  export WPSITE_CONFIG="$CFG" WPSITE_TEAM_CONFIG="$CFG" MANDOS_STUB_CONFIG="$CFG"
+  export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
+  source "$REPO/lib/cmd_maintenance.sh"
+  ssh_setup_mux() { :; }; ssh_close_mux() { :; }
+  _prod_wp() { shift 2; case "$*" in *"option get home"*) echo "https://acme.example" ;; esac; }
+  # visitors see the maintenance page while any lock file exists
+  curl() { local o=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && o="$2"; shift; done
+           if [ -e "$ROOT/.maintenance" ] || [ -e "$ROOT/wp-content/.wpsite-maintenance" ]; then
+             printf '<!-- wpsite-maintenance-page -->' > "$o"; printf 503; else printf ok > "$o"; printf 200; fi; }
+}
+
+@test "maintenance off: removes all four files and confirms the site is live" {
+  _cmd_world
+  _prod_maintenance_on u@h "$ROOT" tok; _prod_maintenance_hold u@h "$ROOT"
+  run cmd_maintenance acme off
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$ROOT/.maintenance" ]; [ ! -e "$ROOT/wp-content/.wpsite-maintenance" ]
+  [ ! -e "$ROOT/wp-content/mu-plugins/wpsite-maintenance.php" ]; [ ! -e "$ROOT/wp-content/maintenance.php" ]
+  [[ "$output" == *"Visitors see the live site"* ]]
+  run cmd_maintenance acme --off                 # the flag form; idempotent
+  [ "$status" -eq 0 ]; [[ "$output" == *"No maintenance files"* ]]
+}
+
+@test "maintenance status (default): shows the locks, held vs expiring, and the fix" {
+  _cmd_world
+  _prod_maintenance_on u@h "$ROOT" tok; _prod_maintenance_hold u@h "$ROOT"
+  run cmd_maintenance acme
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held — no expiry"* ]]; [[ "$output" == *".maintenance (WordPress)"* ]]
+  [[ "$output" == *"MAINTENANCE page"* ]]; [[ "$output" == *"wpsite maintenance acme off"* ]]
+  [ -e "$ROOT/.maintenance" ]                   # status changes nothing
+  printf '%s tok\n' "$(( $(date +%s) - 60 ))" > "$ROOT/wp-content/.wpsite-maintenance"
+  run cmd_maintenance acme status
+  [[ "$output" == *"expired — no longer blocks"* ]]
+}
+
+@test "maintenance: 'on' is refused (apply manages it); unknown client refused" {
+  _cmd_world
+  run cmd_maintenance acme on;   [ "$status" -ne 0 ]; [[ "$output" == *"apply manages it"* ]]
+  run cmd_maintenance ghost off; [ "$status" -ne 0 ]
+  run cmd_maintenance;           [ "$status" -ne 0 ]; [[ "$output" == *"Usage"* ]]
+}
+
+@test "maintenance off: a cache still serving the 503 afterwards is reported (non-zero)" {
+  _cmd_world
+  curl() { local o=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && o="$2"; shift; done
+           printf '<!-- wpsite-maintenance-page -->' > "$o"; printf 503; }
+  run cmd_maintenance acme off
+  [ "$status" -ne 0 ]; [[ "$output" == *"cache"* ]]
+}

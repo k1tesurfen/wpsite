@@ -284,7 +284,7 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
   local c
   local cfg="$BATS_TEST_TMPDIR/dispatch.yml"
   printf 'base_dir: %s/root\n' "$BATS_TEST_TMPDIR" > "$cfg"
-  for c in apply redirect backup push test prune forget hold manual migrate-registry; do
+  for c in apply redirect backup push test prune forget hold manual migrate-registry maintenance; do
     run env WPSITE_ROLE=dev WPSITE_CONFIG="$cfg" "$REPO/bin/wpsite" "$c" somearg
     [ "$status" -ne 0 ]
     [[ "$output" == *"gateway command"* ]] || { echo "not guarded: $c -- $output"; return 1; }

@@ -267,3 +267,40 @@ setup() {
   run _pin_core_version app 7.0.6
   [ "$status" -eq 0 ]; [[ "$output" == *"keeps core 7.0"* ]]
 }
+
+# --- WP-CLI output hygiene (weinwege: PHP warnings on stdout, in the middle of data) ---
+
+@test "_wp_diag_to_stderr: diagnostics + their blank line + a fatal's trace go to stderr" {
+  local in out err
+  in=$'\nWarning: Undefined array key "HTTP_HOST" in /x.php on line 81\nname,version\nakismet,5.0\n\nkept\nDeprecated: x is deprecated in /d.php on line 2\nPHP Fatal error:  Uncaught Error: boom\nStack trace:\n#0 {main}\n  thrown in /y.php on line 3\nlast'
+  out="$(printf '%s\n' "$in" | _wp_diag_to_stderr 2>"$BATS_TEST_TMPDIR/err")"
+  err="$(cat "$BATS_TEST_TMPDIR/err")"
+  [ "$out" = $'name,version\nakismet,5.0\n\nkept\nlast' ]
+  [[ "$err" == *"HTTP_HOST"* ]]; [[ "$err" == *"Deprecated"* ]]
+  [[ "$err" == *"Fatal error"* ]]; [[ "$err" == *"thrown in"* ]]
+}
+
+@test "_wp_filtered: keeps the exit status; clean output passes untouched" {
+  run _wp_filtered bash -c 'echo "Warning: w"; echo data; exit 7'
+  [ "$status" -eq 7 ]
+  out="$(_wp_filtered printf 'a,b\n1,2\n' 2>/dev/null)"
+  [ "$out" = $'a,b\n1,2' ]
+}
+
+@test "_review_pages: only URL-shaped lines become pages (no 'Warning:' page)" {
+  source "$REPO/lib/cmd_upgrade.sh"; source "$REPO/lib/cmd_review.sh"
+  wclient_get() { return 0; }
+  _upgrade_wp() { printf 'Warning: Undefined array key "HTTP_HOST" in /x.php on line 81\nhttp://w.test/a/\n\nhttp://w.test/b/\n'; }
+  run _review_pages weinwege app http://w.test
+  [ "$output" = $'http://w.test\nhttp://w.test/a/\nhttp://w.test/b/' ]
+}
+
+@test "_review_pages: pages on OTHER domains (domain mapping) are never shot — they'd hit production" {
+  source "$REPO/lib/cmd_upgrade.sh"; source "$REPO/lib/cmd_review.sh"
+  wclient_get() { return 0; }
+  _upgrade_wp() { printf 'http://w.test/a/\nhttp://wuerttemberger-weinstrasse.de/poi-detail/\nhttp://w.test/b/\n'; }
+  run _review_pages weinwege app http://w.test
+  [[ "$output" != *"weinstrasse"* ]]
+  [[ "$output" == *"http://w.test/b/"* ]]
+  [[ "$output" == *"skipped 1 page(s) on other domains"* ]]
+}
