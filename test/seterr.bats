@@ -277,3 +277,115 @@ rstrict() { run env REPO="$REPO" bash -c 'set -euo pipefail
   strict 'out="$(_wp_image_for_host wordpress:6.7-php8.3-apache)"; [ -n "$out" ]'
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
 }
+
+# _warn_if_core_older is called as a BARE statement at the end of a build. Its
+# docker exec fails for an absent container and its version compare is a falsy
+# test — both must degrade to 0, not abort the run.
+@test "_warn_if_core_older: absent container / empty version -> does not abort" {
+  strict '_warn_if_core_older "wp_nope_$$_app" "6.9.8"; _warn_if_core_older "wp_nope_$$_app" ""'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+# --- upgrade/apply reconciliation helpers ------------------------------------
+# Both are called as BARE statements (_report_reconcile is the last line of
+# _upgrade_report), so a falsy last command would abort the whole run right
+# before the report is written.
+ustrict() { run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+source "$REPO/lib/common.sh"
+source "$REPO/lib/cmd_upgrade.sh"
+'"$1"'
+echo __REACHED__'; }
+
+@test "_active_plugins_from_csv: missing file / no active rows -> does not abort" {
+  ustrict '_active_plugins_from_csv "$TMP/nope.csv"
+printf "name,version,update,status\nfoo,1.0,none,inactive\n" > "$TMP/c.csv"
+_active_plugins_from_csv "$TMP/c.csv"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_report_reconcile: absent / empty file -> does not abort" {
+  ustrict '_report_reconcile "$TMP/nope.txt"; : > "$TMP/e.txt"; _report_reconcile "$TMP/e.txt"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_reconcile_active_plugins: nothing lost -> clean exit, no runner calls" {
+  ustrict 'printf "name,version,update,status\na,1,none,active\n" > "$TMP/b.csv"
+cp "$TMP/b.csv" "$TMP/a.csv"
+R() { echo "RAN" >> "$TMP/ran"; }
+_reconcile_active_plugins "$TMP/b.csv" "$TMP/a.csv" "$TMP/log" "$TMP/out" R
+[ ! -f "$TMP/ran" ]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_reconcile_active_plugins: EVERY active plugin lost -> still detected" {
+  # Guards the empty-after-set awk trap: NR==FNR would swallow this case entirely.
+  ustrict 'printf "name,version,update,status\na,1,none,active\n" > "$TMP/b.csv"
+printf "name,version,update,status\na,2,none,inactive\n" > "$TMP/a.csv"
+R() { return 0; }
+_reconcile_active_plugins "$TMP/b.csv" "$TMP/a.csv" "$TMP/log" "$TMP/out" R
+grep -q REACTIVATED "$TMP/out"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+# --- report PDF helpers -------------------------------------------------------
+# _report_pdf is a bare statement at the end of _write_client_report_de, and
+# _report_txt's last command is a falsy `[ -f … ]` glob test whenever a run dir
+# holds no report — either one would abort apply right after the update.
+repstrict() { run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+source "$REPO/lib/common.sh"
+source "$REPO/lib/cmd_upgrade.sh"
+source "$REPO/lib/cmd_report.sh"
+'"$1"'
+echo __REACHED__'; }
+
+@test "_report_pdf: no cupsfilter / a failing cupsfilter -> warns, does not abort" {
+  repstrict 'printf x > "$TMP/r.txt"
+have() { return 1; }
+_report_pdf "$TMP/r.txt"
+have() { return 0; }
+cupsfilter() { return 1; }
+_report_pdf "$TMP/r.txt"
+[ ! -e "$TMP/r.pdf" ]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_report_txt: run dir with no report -> empty, does not abort" {
+  repstrict 'mkdir -p "$TMP/run"; out="$(_report_txt "$TMP/run")"; [ -z "$out" ]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+@test "_report_runs: missing kind dir -> empty, does not abort" {
+  repstrict 'WPSITE_CONFIG="$TMP/none.yml"; printf "base_dir: %s\n" "$TMP/base" > "$WPSITE_CONFIG"
+out="$(_report_runs ghost applies)"; [ -z "$out" ]'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
+# --- Update-run helpers (cmd_upgrade.sh) --------------------------------------
+# All called as bare statements inside apply/upgrade; each must survive strict mode
+# with a failing runner / missing CSVs / an empty plan.
+
+@test "update helpers: failing runner, missing CSVs, empty plan -> do not abort" {
+  strict '
+    source "$REPO/lib/cmd_upgrade.sh"
+    d="$(mktemp -d)"; fail() { return 1; }
+    _refresh_update_cache "$d/update.log" fail
+    _ulog_note "$d/update.log" "note"
+    plan="$(_update_plan plugin "$d/none.csv" "$d/update.log" fail)"
+    [ -z "$plan" ] || exit 98
+    _report_missed_updates "$d"
+    printf "name,version,update\nfoo,1.0,available\n" > "$d/plugins.before.csv"
+    cp "$d/plugins.before.csv" "$d/plugins.after.csv"
+    _report_missed_updates "$d" 2>/dev/null
+    grep -q "NOT UPDATED: plugin foo" "$d/update.log" || exit 99
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}

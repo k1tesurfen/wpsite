@@ -28,6 +28,17 @@ setup() {
   cat > "$STUB/wp" <<'EOF'
 #!/bin/bash
 if [[ "$*" == *"db export"* ]]; then
+  # STUB_DB_FAIL: 'tls'  -> self-signed-cert failure unless verification is off
+  #               'other' -> always fail with an unrelated error
+  case "${STUB_DB_FAIL:-}" in
+    tls)
+      if [[ "$*" != *"--ssl-verify-server-cert=0"* ]]; then
+        echo 'mariadb-dump: Got error: 2026: "TLS/SSL error: Certificate verification failure: The certificate is NOT trusted." when trying to connect' >&2
+        exit 1
+      fi ;;
+    other)
+      echo "mysqldump: Got error: 1045: Access denied" >&2; exit 1 ;;
+  esac
   for a in "$@"; do case "$a" in /*) echo "-- dump" > "$a";; esac; done; exit 0
 fi
 case "$*" in
@@ -54,7 +65,7 @@ run_backup() {
   { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nSWEEP_BASE=%q\nSWEEP_PREFIX=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX\n' \
       "$ROOT" "$OUT" "$1" "$mode" "${SWEEP_BASE:-}" "${SWEEP_PREFIX:-wpsite_acme_}"
     _backup_remote_script
-  } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" PATH="$STUB:$PATH" bash -s
+  } | env STUB_MULTISITE="${STUB_MULTISITE:-0}" STUB_DB_FAIL="${STUB_DB_FAIL:-}" PATH="$STUB:$PATH" bash -s
 }
 in_tar() { tar -tzf "$OUT/wp-content.tar.gz" | grep -c "$1"; }
 
@@ -206,4 +217,37 @@ _td_meta() { # folder domain-url
   [ "$status" -eq 0 ]
   run client_get acme cloud_folder
   [ "$output" = "live.de" ]
+}
+
+# Managed hosts (IONOS) present a self-signed DB cert and MariaDB clients >= 11.4
+# verify by default — the export must retry with verification off, not abort.
+@test "db export: retries without server-cert verification on a self-signed DB cert" {
+  STUB_DB_FAIL=tls run_backup ""
+  [ -f "$OUT/db.sql" ]
+  [ ! -f "$OUT/db_export.err" ]
+  [ -f "$OUT/wp-content.tar.gz" ]      # the run carried on to completion
+}
+
+@test "db export: a non-TLS failure still aborts the backup" {
+  local status=0
+  STUB_DB_FAIL=other run_backup "" || status=$?
+  [ "$status" -ne 0 ]
+  [ ! -f "$OUT/wp-content.tar.gz" ]
+}
+
+# clients.<c>.wp_cli: bundled (gerfin, checkdomain/Plesk chroot): the host's `wp` is a
+# WP-Toolkit wrapper that fatals, so the payload must route EVERY wp call through
+# `php $HOME/<phar>` — including the ones inside $(...) and the `command -v wp` check.
+@test "bundled wp-cli: every wp call runs via php + the uploaded phar" {
+  PHPLOG="$BATS_TEST_TMPDIR/php.log"; : > "$PHPLOG"
+  printf '#!/bin/bash\necho "$*" >> %q\nwhile [ $# -gt 0 ]; do case "$1" in *wp-cli.phar) shift; break;; *) shift;; esac; done\nexec %q "$@"\n' \
+    "$PHPLOG" "$STUB/wp" > "$STUB/php"
+  chmod +x "$STUB/php"
+  { printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=1\nBACKUP_MODE=full\nSWEEP_BASE=\nSWEEP_PREFIX=x\nWPSITE_WP_PHAR=%q\nHOME=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX WPSITE_WP_PHAR HOME\n' \
+      "$ROOT" "$OUT" ".wpsite/wp-cli.phar" "$BATS_TEST_TMPDIR/home"
+    _backup_remote_script
+  } | env PATH="$STUB:$PATH" bash -s
+  grep -q "$BATS_TEST_TMPDIR/home/.wpsite/wp-cli.phar db export" "$PHPLOG"
+  grep -q "wp-cli.phar core version" "$PHPLOG"            # a call inside $(...)
+  grep -q '^TABLE_PREFIX=hfm3_' "$OUT/meta.env"           # and its output still lands
 }

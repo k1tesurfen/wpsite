@@ -337,6 +337,7 @@ _redirect_commit() { # client mode arg   (mode: merge|replace|remove; arg: rules
 
   ssh_setup_mux
   trap 'ssh_close_mux' EXIT
+  _remote_wp_prepare "$client"
 
   local cur existing final body block newh
   cur="$(mktemp)"; existing="$(mktemp)"; final="$(mktemp)"
@@ -545,6 +546,7 @@ _redirect_cmd_migrate() {
 
   ssh_setup_mux
   trap 'ssh_close_mux' EXIT
+  _remote_wp_prepare "$client"
   log_info "Reading redirects from the Redirection plugin on '$client' (all groups)..."
   _redirect_migrate_fetch "$client" "$skip" > "$nf"
   ssh_close_mux; trap - EXIT

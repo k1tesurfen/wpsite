@@ -282,8 +282,10 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
 
 @test "dispatcher: role=dev refuses every gateway command" {
   local c
+  local cfg="$BATS_TEST_TMPDIR/dispatch.yml"
+  printf 'base_dir: %s/root\n' "$BATS_TEST_TMPDIR" > "$cfg"
   for c in apply redirect backup client push test prune; do
-    run env WPSITE_ROLE=dev "$REPO/bin/wpsite" "$c" somearg
+    run env WPSITE_ROLE=dev WPSITE_CONFIG="$cfg" "$REPO/bin/wpsite" "$c" somearg
     [ "$status" -ne 0 ]
     [[ "$output" == *"gateway command"* ]] || { echo "not guarded: $c -- $output"; return 1; }
   done
@@ -292,15 +294,23 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
 @test "dispatcher: role=dev still allows the dev-box commands" {
   # These must get past the guard; they may then fail on their own preconditions,
   # but never with the role message.
-  local c
+  #
+  # WPSITE_CONFIG is MANDATORY here even though this only checks dispatch: these are
+  # real subprocesses, so without it they read the developer's OWN config. `db` with
+  # no args is the one that bites — it reopens the last-used site, which launched
+  # Adminer in a real browser on every single test run.
+  local c cfg="$BATS_TEST_TMPDIR/dispatch.yml"
+  printf 'base_dir: %s/root\n' "$BATS_TEST_TMPDIR" > "$cfg"
   for c in clone new inject start stop destroy db status list; do
-    run env WPSITE_ROLE=dev "$REPO/bin/wpsite" "$c"
+    run env WPSITE_ROLE=dev WPSITE_CONFIG="$cfg" "$REPO/bin/wpsite" "$c"
     [[ "$output" != *"gateway command"* ]] || { echo "wrongly guarded: $c"; return 1; }
   done
 }
 
 @test "dispatcher: unset role leaves every command reachable (default is unrestricted)" {
-  run env "$REPO/bin/wpsite" push
+  local cfg="$BATS_TEST_TMPDIR/dispatch.yml"
+  printf 'base_dir: %s/root\n' "$BATS_TEST_TMPDIR" > "$cfg"
+  run env WPSITE_CONFIG="$cfg" "$REPO/bin/wpsite" push
   [ "$status" -ne 0 ]
   [[ "$output" == *"Usage: wpsite push"* ]]
 }

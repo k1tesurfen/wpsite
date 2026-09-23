@@ -24,32 +24,119 @@ _wp_image_tag() { # wp_version php_version
   fi
 }
 
+# Minor series of a WP version: 6.9.8 -> 6.9 (prints the version unchanged when it
+# has no patch component). The official image does NOT publish a tag for every patch
+# release — 6.9.8 has none while 6.9 does — so the series tag is the bridge.
+_wp_minor() { # wp_version
+  case "$1" in
+    *.*.*) printf '%s' "${1%.*}" ;;
+    *)     printf '%s' "$1" ;;
+  esac
+}
+
 # Candidate image tags in priority order. The exact prod match is ideal, but the
 # official wordpress image doesn't publish every WP×PHP combo (e.g. WP 7.0 ships
-# only php8.2/8.3, not php8.1). For a local replica the WP *core* version matters
-# far more than the PHP minor, so we keep WP and let PHP float before the reverse.
+# only php8.2/8.3, not php8.1), nor a tag per patch release. For a local replica the
+# WP *core* version matters far more than the PHP minor, so we keep WP and let PHP
+# float before the reverse — INCLUDING the WP minor series before any PHP-pinned tag.
+# That ordering is load-bearing: `wordpress:php8.0-apache` is frozen at WP 6.4.1 (the
+# last core built for PHP 8.0), so reaching it from a 6.9 site gives core OLDER than
+# the imported DB, and every plugin calling a post-6.4 core function fatals on the
+# frontend while wp-admin still loads (seen on a 6.9.8/php8.0 site: Yoast calling
+# wp_is_serving_rest_request(), added in 6.5).
 _wp_image_candidates() { # wp php
-  local wp="$1" php="$2"
-  if [ -n "$wp" ] && [ -n "$php" ]; then echo "wordpress:${wp}-php${php}-apache"; fi
-  if [ -n "$wp" ];                  then echo "wordpress:${wp}-apache"; fi
-  if [ -n "$php" ];                 then echo "wordpress:php${php}-apache"; fi
+  local wp="$1" php="$2" minor=""
+  if [ -n "$wp" ]; then
+    minor="$(_wp_minor "$wp")"
+    if [ "$minor" = "$wp" ]; then minor=""; fi
+  fi
+  if [ -n "$wp" ]    && [ -n "$php" ]; then echo "wordpress:${wp}-php${php}-apache"; fi
+  if [ -n "$minor" ] && [ -n "$php" ]; then echo "wordpress:${minor}-php${php}-apache"; fi
+  if [ -n "$wp" ];                     then echo "wordpress:${wp}-apache"; fi
+  if [ -n "$minor" ];                  then echo "wordpress:${minor}-apache"; fi
+  if [ -n "$php" ];                    then echo "wordpress:php${php}-apache"; fi
   echo "wordpress:latest"
 }
 
-# Resolve to the first candidate that actually exists on the registry (probed with
-# `docker manifest inspect`, which doesn't pull). Falls back to the preferred tag
-# when probing can't run (offline / no docker) so behaviour degrades to the old
-# pin-and-let-compose-complain path rather than silently picking `latest`.
+# Core-older-than-the-DB guard. The image resolver can only fall back to tags that
+# EXIST, and a PHP-pinned fallback may carry a core years behind the snapshot. WP
+# upgrades a DB forward silently, but running OLDER core against a newer DB fatals
+# the frontend as soon as a plugin calls a core function that core doesn't have yet
+# — and wp-admin often still works, so it looks like "only the frontend is broken".
+# Warn loudly instead of leaving that to be discovered in the browser.
+_warn_if_core_older() { # app_container prod_wp_version
+  local app="$1" want="$2" have
+  [ -n "$want" ] || return 0
+  have="$(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
+            core version 2>/dev/null | tr -d '\r')" || true
+  [ -n "$have" ] || return 0
+  # Only a MINOR-series gap matters: the series tag trails the newest patch release
+  # by design (6.9 ships 6.9.4 while prod runs 6.9.8) and that is harmless — core
+  # within the same series has the same function surface. Warn when the replica's
+  # series is genuinely behind, which is the direction that fatals the frontend.
+  local have_m want_m
+  have_m="$(_wp_minor "$have")"; want_m="$(_wp_minor "$want")"
+  if [ "$have_m" != "$want_m" ] && \
+     [ "$(printf '%s\n%s\n' "$have_m" "$want_m" | sort -V | head -1)" = "$have_m" ]; then
+    log_warn "Replica core is $have but the backup came from WP $want — OLDER core than the DB."
+    log_warn "Plugins calling newer core functions will fatal on the frontend (wp-admin may still work)."
+    log_warn "No published image matched; consider pinning a newer tag (e.g. wordpress:$(_wp_minor "$want")-apache)."
+  fi
+  return 0
+}
+
+
+# Best tag to use when the registry CANNOT be consulted (offline, Docker Hub rate
+# limit, no docker). Never the exact patch tag: the image build LAGS WordPress, so a
+# patch released recently — or a security release on an older branch — often has no tag
+# even though its neighbours do (7.0.4 is published, 7.0.5 and 6.9.8 are not). Pinning
+# one blind is therefore a coin flip on a failed pull, while the minor series tag is
+# always republished for a supported branch. Most specific tag that is a safe guess.
+_wp_image_fallback() { # wp php
+  local wp="$1" php="$2" minor=""
+  [ -n "$wp" ] && minor="$(_wp_minor "$wp")"
+  if [ -n "$minor" ] && [ -n "$php" ]; then echo "wordpress:${minor}-php${php}-apache"; return 0; fi
+  if [ -n "$minor" ];                  then echo "wordpress:${minor}-apache";          return 0; fi
+  if [ -n "$php" ];                    then echo "wordpress:php${php}-apache";         return 0; fi
+  echo "wordpress:latest"
+}
+
+# Resolve to the first candidate that is usable, cheapest source first:
+#   1. an image already on this machine   — no network, no rate limit, offline-correct
+#   2. a tag that exists on the registry  — probed with `docker manifest inspect`
+#      (metadata only, no pull)
+#   3. _wp_image_fallback                 — when probing itself is unavailable
+# Step 3 distinguishes "that tag does not exist" (keep trying the next candidate)
+# from "I cannot ask" — Docker Hub's UNAUTHENTICATED pull limit counts every manifest
+# probe, so a few builds in a row can turn every probe into `toomanyrequests`. Treating
+# that as "tag missing" would walk the whole list and then pin the exact patch tag,
+# which never exists — turning a rate limit into a failed build.
 _resolve_wp_image() { # wp php
-  local wp="$1" php="$2" tag first=""
+  local wp="$1" php="$2" tag err cands=() fallback
   while IFS= read -r tag; do
-    [ -n "$tag" ] || continue
-    [ -n "$first" ] || first="$tag"
-    if docker manifest inspect "$tag" >/dev/null 2>&1; then
+    [ -n "$tag" ] && cands+=("$tag")
+  done < <(_wp_image_candidates "$wp" "$php")
+  fallback="$(_wp_image_fallback "$wp" "$php")"
+  [ "${#cands[@]}" -gt 0 ] || { printf '%s' "$fallback"; return 0; }
+
+  for tag in "${cands[@]}"; do
+    if docker image inspect "$tag" >/dev/null 2>&1; then printf '%s' "$tag"; return 0; fi
+  done
+
+  for tag in "${cands[@]}"; do
+    if err="$(docker manifest inspect "$tag" 2>&1 >/dev/null)"; then
       printf '%s' "$tag"; return 0
     fi
-  done < <(_wp_image_candidates "$wp" "$php")
-  printf '%s' "$first"
+    case "$err" in
+      *"no such manifest"*|*"manifest unknown"*|*"not found"*|*"no such image"*|*"does not exist"*)
+        ;;                                  # genuinely absent -> try the next candidate
+      *)
+        log_warn "Cannot probe the registry (${err%%$'\n'*})."
+        log_warn "Using $fallback — the most specific tag that can exist without a lookup."
+        printf '%s' "$fallback"; return 0 ;;
+    esac
+  done
+  printf '%s' "$fallback"
 }
 
 # --- Host-matched WordPress image (native-Linux bind-mount ownership) -------------
@@ -889,12 +976,13 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
   # Pure SQL, independent of the wp-cli branch above; no-op if Wordfence is absent.
   _silence_wordfence "$db_c" "$table_prefix"
 
-  # Real liveness check — WordPress must see itself as installed. Catches a table
+# Real liveness check — WordPress must see itself as installed. Catches a table
   # prefix mismatch (the symptom: wp-cli prints "site not installed / Found
   # installation with table prefix: …"), which would otherwise sail past all the
   # `|| true`-guarded steps above and report a false success.
   if docker exec "$app_c" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
        core is-installed >/dev/null 2>&1; then
+    _warn_if_core_older "$app_c" "$wp_version"
     log_ok "SUCCESS: $local_url is live."
   else
     log_warn "Build finished, but WordPress does not report as installed — the replica is likely broken."

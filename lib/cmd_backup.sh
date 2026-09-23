@@ -23,6 +23,12 @@ _backup_cleanup() {
 _backup_remote_script() {
   cat <<'REMOTE_EOF'
     set -e
+    # Host wp unusable (Plesk chroot, see _remote_wp_prepare) — use the phar wpsite
+    # uploaded instead. A FUNCTION, so every wp call below, including the
+    # `command -v wp` check and the ones inside $(...), picks it up unchanged.
+    if [ -n "${WPSITE_WP_PHAR:-}" ]; then
+      wp() { php -d memory_limit=512M -d max_execution_time=300 "$HOME/$WPSITE_WP_PHAR" "$@"; }
+    fi
     # identify (ImageMagick) is only needed to measure media for placeholders.
     REQUIRED="wp tar"; [ -z "$FULL_BACKUP" ] && REQUIRED="$REQUIRED identify"
     for cmd in $REQUIRED; do
@@ -63,7 +69,23 @@ _backup_remote_script() {
     fi
 
     echo "Exporting database..."
-    wp db export "$REMOTE_TMP/db.sql" --allow-root
+    # Managed hosts (IONOS et al.) front their MySQL with a SELF-SIGNED certificate,
+    # and MariaDB clients >= 11.4 verify the server cert by DEFAULT — so the dump
+    # dies with "TLS/SSL error: Certificate verification failure" on a site that PHP
+    # itself connects to happily (mysqli does not verify). Try the verifying export
+    # first and only retry unverified when that is the actual failure, so a host with
+    # a trustworthy cert keeps verifying.
+    if ! wp db export "$REMOTE_TMP/db.sql" --allow-root 2>"$REMOTE_TMP/db_export.err"; then
+      if grep -qiE 'certificate|TLS/SSL error' "$REMOTE_TMP/db_export.err"; then
+        cat "$REMOTE_TMP/db_export.err" >&2
+        echo "DB server certificate is not verifiable (self-signed host cert) — retrying without server-cert verification..."
+        wp db export "$REMOTE_TMP/db.sql" --allow-root --ssl-verify-server-cert=0
+      else
+        cat "$REMOTE_TMP/db_export.err" >&2
+        exit 1
+      fi
+    fi
+    rm -f "$REMOTE_TMP/db_export.err"
 
     # Regenerable caches + other backup/staging plugins' archive output (WP Staging
     # .wpstg files, UpdraftPlus, All-in-One WP Migration, WPvivid …). These are
@@ -179,12 +201,15 @@ _backup_one_client() { # client full_flag persist_flag
 
   mkdir -p "$dest"
 
+  _remote_wp_prepare "$client"
+  local wp_phar=""; [ "$_WPSITE_WP_BUNDLED" = 1 ] && wp_phar="$WPSITE_REMOTE_PHAR"
+
   # The remote script is piped to `bash -s` over stdin — no embedding in a command
   # argument (its quotes/heredocs stay safe), no tmux. Output streams live.
   log_info "Running remote backup (streaming output)..."
   if ! {
-    printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nSWEEP_BASE=%q\nSWEEP_PREFIX=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX\n' \
-      "$wp_root" "$remote_tmp" "$full_flag" "$mode" "$sweep_base" "wpsite_${client}_"
+    printf 'WP_ROOT=%q\nREMOTE_TMP=%q\nFULL_BACKUP=%q\nBACKUP_MODE=%q\nSWEEP_BASE=%q\nSWEEP_PREFIX=%q\nWPSITE_WP_PHAR=%q\nexport WP_ROOT REMOTE_TMP FULL_BACKUP BACKUP_MODE SWEEP_BASE SWEEP_PREFIX WPSITE_WP_PHAR\n' \
+      "$wp_root" "$remote_tmp" "$full_flag" "$mode" "$sweep_base" "wpsite_${client}_" "$wp_phar"
     _backup_remote_script
   } | wpsite_ssh "$ssh_target" bash -s; then
     log_error "$client: remote backup failed (see output above)."

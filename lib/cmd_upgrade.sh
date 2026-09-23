@@ -10,6 +10,135 @@ _upgrade_wp() { # app_container args...
   docker exec "$app" php -d memory_limit=512M -d max_execution_time=300 /usr/local/bin/wp --allow-root --path=/var/www/html "$@"
 }
 
+# --- Active-plugin reconciliation -------------------------------------------
+# An update can leave a plugin DEACTIVATED: a failed upgrade routine, WP's own
+# fatal-error protection, or a plugin deactivating itself. Nothing used to notice.
+# The before/after CSVs recorded name,version,update but never `status`, and every
+# update call sent stdout AND stderr to /dev/null — so a silently dropped plugin
+# left no trace at all. Seen in the wild: wp-mail-smtp went inactive during a
+# production apply and was caught only because the verification mail never arrived.
+#
+# `status` is appended as the LAST CSV field on purpose — _report_section and
+# _report_section_de index $2/$3 and join -o '1.1,1.2,2.2', so adding a leading
+# field would silently shift every existing version diff.
+WPSITE_PLUGIN_FIELDS="name,version,update,status"
+
+# Active plugins in a name,version,update,status CSV → "name<TAB>status" per line.
+# Tolerates the older 3-field CSVs (no $4 → no output), so an upgrade dir written
+# by an earlier wpsite still renders. Quoted names ("foo (old)") are unquoted.
+_active_plugins_from_csv() { # csv
+  [ -f "$1" ] || return 0
+  tail -n +2 "$1" 2>/dev/null | awk -F, '
+    $4=="active" || $4=="active-network" {
+      name=$1; gsub(/^"|"$/,"",name); printf "%s\t%s\n", name, $4
+    }' || true
+  return 0
+}
+
+# Restore plugins that were active BEFORE the run and are not active after.
+# Each candidate is activated, then WP is booted once (`wp eval` loads every active
+# plugin) to prove the site still comes up. A plugin that fatals is deactivated
+# again and reported for manual investigation rather than left breaking the site —
+# that is the accident-vs-error split: only what boots cleanly is auto-healed.
+# Writes "<result><TAB><name><TAB><detail>" per candidate to <outfile>.
+# The runner ("$@") is the wp driver plus its fixed args: `_upgrade_wp <container>`
+# locally, `_prod_wp <ssh_target> <wp_root>` on production — so both paths share
+# this logic and can't drift.
+# Returns non-zero when at least one plugin could NOT be restored.
+_reconcile_active_plugins() { # before_csv after_csv logfile outfile runner...
+  local before="$1" after="$2" logf="$3" outf="$4"; shift 4
+  : > "$outf"
+  [ -f "$before" ] || return 0
+
+  local tmp; tmp="$(mktemp -d)"
+  _active_plugins_from_csv "$before" > "$tmp/b"
+  _active_plugins_from_csv "$after"  > "$tmp/a"
+  # Active before, absent from the after-set. Keyed on the NAME only: a plugin that
+  # merely dropped from active-network to active is still running, not lost.
+  # awk, not a bash associative array — the codebase stays bash-3.2 compatible.
+  # NOT the usual NR==FNR two-file idiom: when the after-set is EMPTY (every active
+  # plugin dropped out) NR==FNR is still true for the first line of the second file,
+  # so the loss would be silently swallowed. Reading the after-set in BEGIN via
+  # getline is empty-file-safe.
+  local lost_raw
+  lost_raw="$(awk -F'\t' -v afile="$tmp/a" '
+    BEGIN { while ((getline line < afile) > 0) { split(line, f, "\t"); seen[f[1]]=1 } }
+    !($1 in seen)
+  ' "$tmp/b" || true)"
+  rm -rf "$tmp"
+
+  # Collect into an array FIRST. The runner may be ssh (apply), and ssh reads stdin —
+  # driven from inside a `while read` loop it would swallow the remaining candidates,
+  # the same trap that forces ffmpeg's -nostdin in _gen_placeholder. Every runner
+  # call below also gets </dev/null for the same reason.
+  local lost=() line
+  while IFS= read -r line; do [ -n "$line" ] && lost+=("$line"); done <<EOF
+$lost_raw
+EOF
+  # bash 3.2: "${lost[@]}" on an empty array trips set -u, so bail out before it.
+  [ "${#lost[@]}" -eq 0 ] && return 0
+
+  local failed=0 name st entry activated
+  log_warn "${#lost[@]} plugin(s) went INACTIVE during the update — reconciling..."
+
+  # Baseline: does the site boot AT ALL before we touch anything? Without this, a
+  # PRE-EXISTING fatal (a prod-only plugin, a broken drop-in, a half-applied update)
+  # is blamed on whichever plugin we happen to reactivate first, and a perfectly
+  # healthy plugin gets left switched off for a fault that was never its own.
+  local bootable=1
+  "$@" eval 'echo "WPSITE_BOOT_OK";' >> "$logf" 2>&1 < /dev/null || bootable=0
+  [ "$bootable" = 1 ] \
+    || log_warn "  site does NOT boot cleanly before reconciliation — boot checks disabled"
+  for entry in "${lost[@]}"; do
+    name="$(printf '%s' "$entry" | cut -f1)"   # cut's default delimiter is TAB
+    st="$(printf '%s' "$entry" | cut -f2)"
+    [ -n "$name" ] || continue
+    printf '\n--- reconcile: activating %s (was %s) ---\n' "$name" "$st" >> "$logf"
+    activated=0
+    if [ "$st" = "active-network" ]; then
+      "$@" plugin activate "$name" --network >> "$logf" 2>&1 < /dev/null && activated=1
+    else
+      "$@" plugin activate "$name" >> "$logf" 2>&1 < /dev/null && activated=1
+    fi
+    if [ "$activated" != 1 ]; then
+      printf 'FAILED\t%s\tactivation refused — see update.log\n' "$name" >> "$outf"
+      log_error "  $name: could not be reactivated — investigate by hand"
+      failed=1
+      continue
+    fi
+    if [ "$bootable" != 1 ]; then
+      printf 'UNVERIFIED\t%s\treactivated, but the site already failed to boot beforehand\n' "$name" >> "$outf"
+      log_warn "  $name: reactivated, but the boot check is unusable — verify by hand"
+      failed=1
+      continue
+    fi
+    # Boot check: `wp eval` loads every active plugin, so a fatal surfaces here.
+    if "$@" eval 'echo "WPSITE_BOOT_OK";' >> "$logf" 2>&1 < /dev/null; then
+      printf 'REACTIVATED\t%s\tno error on boot\n' "$name" >> "$outf"
+      log_ok "  $name: reactivated (site still boots)"
+    else
+      "$@" plugin deactivate "$name" --skip-plugins >> "$logf" 2>&1 < /dev/null || true
+      printf 'FAILED\t%s\tfatal error on boot — left DEACTIVATED\n' "$name" >> "$outf"
+      log_error "  $name: fatals on load — left deactivated, investigate by hand"
+      failed=1
+    fi
+  done
+  [ "$failed" = 0 ]
+}
+
+# Report block for the reconciliation file. Silent when nothing went inactive.
+_report_reconcile() { # reconcile.txt
+  [ -s "$1" ] || return 0
+  echo
+  echo "Plugin activation state:"
+  awk -F'\t' '
+    $1=="REACTIVATED" {printf "  ↻ %s — went inactive during the update, reactivated OK\n",$2}
+    $1=="FAILED"      {printf "  ✗ %s — went inactive and could NOT be restored: %s\n",$2,$3}
+    $1=="UNVERIFIED"  {printf "  ? %s — %s; verify by hand\n",$2,$3}
+  ' "$1"
+  return 0
+}
+
 # Render the changed + still-pending items for one section (plugins or themes) by
 # diffing two `name,version,update` CSVs (wp-cli --format=csv, header on line 1).
 _report_section() { # before.csv after.csv
@@ -45,6 +174,7 @@ _upgrade_report() { # client stamp core_before core_after dir
   echo
   echo "Themes:"
   _report_section "$dir/themes.before.csv" "$dir/themes.after.csv"
+  _report_reconcile "$dir/plugins.reconcile.txt"
 }
 
 _report_section_de() { # before.csv after.csv
@@ -70,8 +200,164 @@ _report_section_de() { # before.csv after.csv
   return 0
 }
 
-_client_report_de() { # client stamp core_before core_after dir
-  local client="$1" stamp="$2" cb="$3" ca="$4" dir="$5"
+# Plugins we NEVER auto-update — in the local `upgrade` rehearsal and on `apply`
+# alike. One list for both paths so they can't drift; empty output = update it.
+# Note these are EXACT slugs: the free `wp-staging` is a different plugin and IS
+# updated. Deactivation is a separate concern (_sanitize_plugins in cmd_build.sh);
+# these stay active, we just don't let the updater touch them.
+_plugin_update_skip_reason() { # slug
+  case "$1" in
+    # Premium: its updater needs a logged-in user and the credentials rotate.
+    wp-staging-pro) printf 'premium, no auto-update' ;;
+    # Our own plugin: we ship it ourselves (wpsite inject / by hand), so an updater
+    # run would at best be a no-op and at worst overwrite it with an unrelated
+    # wp.org plugin that happens to share the slug.
+    aule)           printf 'our own plugin, updated by hand' ;;
+  esac
+  return 0
+}
+
+# --- Update run + its log ----------------------------------------------------
+# update.log must let a run be reconstructed AFTER the fact, from local files alone
+# (production may since have been fixed by hand). It used to hold only raw wp-cli
+# output: no command, no time, no exit code, and neither the list the loop iterated
+# nor any skip decision. On bauklimaneutral (apply 20260923_105427) six plugins the
+# before-snapshot flagged as updatable were never even attempted, and the log could
+# not say why. So every call is a labelled section and every decision a note.
+
+# One wp-cli call as a labelled, timestamped section of <logfile>; returns its exit code.
+_ulog() { # logfile label runner...
+  local logf="$1" label="$2"; shift 2
+  local rc=0
+  printf '\n=== %s  %s\n' "$(date '+%F %T')" "$label" >> "$logf"
+  "$@" >> "$logf" 2>&1 || rc=$?
+  printf '=== exit %s\n' "$rc" >> "$logf"
+  return "$rc"
+}
+
+# A decision (plan entry, skip, miss) as a single line of <logfile>.
+_ulog_note() { # logfile message
+  printf -- '--- %s  %s\n' "$(date '+%F %T')" "$2" >> "$1"
+  return 0
+}
+
+# Drop WordPress's cached update data and re-query plugin + theme updates, logging
+# what came back. `core update` invalidates this cache, and a list taken straight
+# afterwards can come back WITHOUT the wp.org entries — third-party updaters that
+# inject their data live (greyd) still show up, which hides the gap. Never fatal.
+_refresh_update_cache() { # logfile runner...
+  local logf="$1"; shift
+  # shellcheck disable=SC2016  # PHP source: the $vars are PHP's, not the shell's
+  _ulog "$logf" "refresh update cache" "$@" eval '
+    wp_clean_update_cache(); wp_update_plugins(); wp_update_themes();
+    $p = get_site_transient("update_plugins"); $t = get_site_transient("update_themes");
+    echo "plugins with updates: ", implode(" ", array_keys((array) ($p->response ?? array()))), "\n";
+    echo "themes with updates:  ", implode(" ", array_keys((array) ($t->response ?? array()))), "\n";' \
+    || log_warn "Could not refresh the update cache — see update.log"
+  return 0
+}
+
+# Names flagged update=available in a name,version,update[,status] CSV.
+_update_available_from_csv() { # csv
+  [ -f "$1" ] || return 0
+  tail -n +2 "$1" 2>/dev/null | awk -F, '$3=="available" { n=$1; gsub(/^"|"$/,"",n); print n }' || true
+  return 0
+}
+
+# The update candidates for <kind> (plugin|theme): everything the BEFORE snapshot
+# flagged update=available, plus whatever a fresh --update=available query reports.
+# Taking the union means a flaky post-core-update query can no longer silently shrink
+# the run. Every candidate is noted in the log with where it came from.
+_update_plan() { # kind before_csv logfile runner...
+  local kind="$1" csv="$2" logf="$3"; shift 3
+  local before fresh raw n src
+  before="$(_update_available_from_csv "$csv")"
+  raw="$("$@" "$kind" list --update=available --field=name 2>>"$logf" | tr -d '\r' || true)"
+  # Keep slug-shaped lines only: a PHP notice printed to stdout must not become a slug.
+  fresh="$(printf '%s\n' "$raw" | grep -E '^[A-Za-z0-9._-]+$' || true)"
+  _ulog_note "$logf" "$kind plan: before-snapshot=[$(printf '%s' "$before" | tr '\n' ' ')] fresh-query=[$(printf '%s' "$fresh" | tr '\n' ' ')]"
+  { printf '%s\n' "$before"; printf '%s\n' "$fresh"; } | awk 'NF && !seen[$0]++' | while IFS= read -r n; do
+    case $'\n'"$fresh"$'\n' in
+      *$'\n'"$n"$'\n'*) src="reported by fresh query" ;;
+      *)                src="ONLY in before-snapshot — fresh query missed it" ;;
+    esac
+    _ulog_note "$logf" "$kind plan: $n ($src)"
+    printf '%s\n' "$n"
+  done
+  return 0
+}
+
+# Core, plugin and theme updates — ONE implementation for the local rehearsal
+# (`_upgrade_wp <container>`) and production (`_prod_wp <target> <root>`), so the two
+# can't drift. Needs <dir>/plugins.before.csv + themes.before.csv already written.
+# Updates run one-by-one (a failing plugin must not abort the cascade).
+# Returns non-zero when any update call failed; callers decide how loud to be.
+_run_updates() { # dir is_multisite runner...
+  local dir="$1" is_ms="$2"; shift 2
+  local logf="$dir/update.log" rc=0 x skip list
+  log_info "Updating WordPress core..."
+  _ulog "$logf" "core update" "$@" core update || { rc=1; log_warn "core update failed"; }
+  # Multisite migrates ALL subsites' tables → needs --network (which errors on single sites).
+  if [ "$is_ms" = 1 ]; then
+    _ulog "$logf" "core update-db --network" "$@" core update-db --network \
+      || { rc=1; log_warn "core update-db --network failed"; }
+  else
+    _ulog "$logf" "core update-db" "$@" core update-db || { rc=1; log_warn "core update-db failed"; }
+  fi
+  _refresh_update_cache "$logf" "$@"
+
+  log_info "Updating plugins..."
+  list="$(_update_plan plugin "$dir/plugins.before.csv" "$logf" "$@")"
+  [ -n "$list" ] || log_info "  All plugins already up to date."
+  for x in $list; do
+    skip="$(_plugin_update_skip_reason "$x")"
+    if [ -n "$skip" ]; then
+      log_info "  Skipping $x ($skip)"
+      _ulog_note "$logf" "plugin skip: $x ($skip)"
+      continue
+    fi
+    log_info "  Updating plugin: $x..."
+    _ulog "$logf" "plugin update $x" "$@" plugin update "$x" || { rc=1; log_warn "  Plugin update failed: $x"; }
+  done
+
+  log_info "Updating themes..."
+  list="$(_update_plan theme "$dir/themes.before.csv" "$logf" "$@")"
+  [ -n "$list" ] || log_info "  All themes already up to date."
+  for x in $list; do
+    log_info "  Updating theme: $x..."
+    _ulog "$logf" "theme update $x" "$@" theme update "$x" || { rc=1; log_warn "  Theme update failed: $x"; }
+  done
+  return "$rc"
+}
+
+# After the run: what was updatable BEFORE but still sits at the same version (and
+# isn't on the skip list)? Warned on the terminal and noted in update.log, so a
+# silently short run is loud instead of only a line in the report.
+_report_missed_updates() { # dir
+  local dir="$1" kind csv_b csv_a n vb va missed=""
+  for kind in plugin theme; do
+    csv_b="$dir/${kind}s.before.csv"; csv_a="$dir/${kind}s.after.csv"
+    for n in $(_update_available_from_csv "$csv_b"); do
+      [ "$kind" = plugin ] && [ -n "$(_plugin_update_skip_reason "$n")" ] && continue
+      vb="$(awk -F, -v n="$n" 'NR>1 { x=$1; gsub(/^"|"$/,"",x); if (x==n) { print $2; exit } }' "$csv_b" 2>/dev/null || true)"
+      va="$(awk -F, -v n="$n" 'NR>1 { x=$1; gsub(/^"|"$/,"",x); if (x==n) { print $2; exit } }' "$csv_a" 2>/dev/null || true)"
+      if [ -n "$va" ] && [ "$vb" = "$va" ]; then
+        missed="$missed $kind:$n"
+        _ulog_note "$dir/update.log" "NOT UPDATED: $kind $n still $va (was update=available before)"
+      fi
+    done
+  done
+  if [ -n "$missed" ]; then
+    log_warn "Updatable before the run but NOT updated:$missed"
+    log_warn "  Details: $dir/update.log (search 'NOT UPDATED' / 'plan:')"
+  fi
+  return 0
+}
+
+# Renders the customer-facing report. $1 is the SITE LABEL shown to the customer
+# (the domain — see _write_client_report_de), never the internal client id.
+_client_report_de() { # site stamp core_before core_after dir
+  local site="$1" stamp="$2" cb="$3" ca="$4" dir="$5"
   local formatted_date
   # Parse stamp (YYYYMMDD_HHMMSS) to a nice readable German format, e.g. DD.MM.YYYY um HH:MM Uhr
   if [[ "$stamp" =~ ^([0-9]{4})([0-9]{2})([0-9]{2})_([0-9]{2})([0-9]{2})([0-9]{2})$ ]]; then
@@ -88,7 +374,7 @@ _client_report_de() { # client stamp core_before core_after dir
 --------------------------------------------------------------------------------
 PROJEKT-DETAILS
 --------------------------------------------------------------------------------
-  • Kunde / Projekt:    $client
+  • Website:            $site
   • Zeitpunkt:          $formatted_date
   • Status nach Update: Aktiv und stabil (HTTP 200)
 
@@ -113,6 +399,16 @@ EOF
   _report_section_de "$dir/themes.before.csv" "$dir/themes.after.csv"
   echo
 
+  if [ -s "$dir/plugins.reconcile.txt" ]; then
+    echo "Plugin-Aktivierung:"
+    awk -F'\t' '
+      $1=="REACTIVATED" {printf "    ↻ %s — war nach dem Update kurzzeitig deaktiviert und wurde reaktiviert\n",$2}
+      $1=="FAILED"      {printf "    ✗ %s — ist nach dem Update deaktiviert und konnte NICHT reaktiviert werden (manuelle Prüfung erforderlich)\n",$2}
+      $1=="UNVERIFIED"  {printf "    ? %s — wurde reaktiviert, konnte aber nicht automatisch geprüft werden (manuelle Prüfung erforderlich)\n",$2}
+    ' "$dir/plugins.reconcile.txt"
+    echo
+  fi
+
   cat <<EOF
 --------------------------------------------------------------------------------
 UNSERE QUALITÄTSSICHERUNG
@@ -126,6 +422,43 @@ Im Rahmen des Wartungsprozesses wurden folgende Schritte durchgeführt:
 
 ================================================================================
 EOF
+}
+
+# Render <txt> to a PDF next to it via macOS `cupsfilter` — the one place the
+# report's print styling is produced, so a regenerated PDF (`wpsite report`) is
+# byte-for-byte the same shape as the one apply wrote. Non-fatal: the .txt is the
+# real deliverable and cupsfilter doesn't exist on a headless Linux box.
+_report_pdf() { # txt_file
+  local txt="$1" pdf="${1%.txt}.pdf"
+  have cupsfilter || { log_warn "cupsfilter not available — no PDF written (txt: $txt)"; return 0; }
+  cupsfilter -i text/plain -o document-format=application/pdf "$txt" > "$pdf" 2>/dev/null || {
+    log_warn "PDF generation failed — the report text is still at $txt"
+    rm -f "$pdf"
+    return 0
+  }
+  return 0
+}
+
+# Write the German maintenance report (txt + PDF) for <client> into <dir>.
+# Mode `domain` is the CUSTOMER-facing form used by `apply`: the file is named after,
+# and the report headed with, the site's DOMAIN (bluebase5_com-wartungsbericht.pdf,
+# "bluebase5.com") — the client id is our in-house reference and must not travel to
+# the customer. Any other mode (the default, used by the local `upgrade` rehearsal,
+# whose report nobody sends out) keeps the plain `wartungsbericht.txt` + the id.
+_write_client_report_de() { # client stamp core_before core_after dir [mode]
+  local client="$1" stamp="$2" cb="$3" ca="$4" dir="$5" mode="${6:-}"
+  local site base
+  if [ "$mode" = domain ]; then
+    site="$(client_domain "$client")"
+    base="$(printf '%s' "$site" | tr '.' '_')-wartungsbericht"
+  else
+    site="$client"
+    base="wartungsbericht"
+  fi
+  _client_report_de "$site" "$stamp" "$cb" "$ca" "$dir" > "$dir/$base.txt"
+  _report_pdf "$dir/$base.txt"
+  log_ok "Wartungsbericht (DE): $dir/$base.txt (.pdf)"
+  return 0
 }
 
 cmd_upgrade() {
@@ -174,66 +507,39 @@ cmd_upgrade() {
     _capture_shots "$dir/before" "$shot_hosts" "$dismiss" "${specs[@]}" || log_warn "before-capture had issues"
   fi
 
-  # --- BEFORE versions ---
+  # --- BEFORE versions (fresh update data first, so the snapshot isn't stale) ---
+  _refresh_update_cache "$dir/update.log" _upgrade_wp "$app_c"
   local core_before; core_before="$(_upgrade_wp "$app_c" core version 2>/dev/null | tr -d '\r')"
-  _upgrade_wp "$app_c" plugin list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.before.csv"
+  _upgrade_wp "$app_c" plugin list --fields="$WPSITE_PLUGIN_FIELDS" --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.before.csv"
   _upgrade_wp "$app_c" theme  list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/themes.before.csv"
 
   # --- Upgrades (the version diff is the source of truth, so warn-don't-die) ---
-  log_info "Updating WordPress core..."
-  _upgrade_wp "$app_c" core update    >/dev/null 2>&1 || log_warn "core update reported an issue"
-  # Multisite migrates ALL subsites' tables → needs --network (which errors on single sites).
-  if [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ]; then
-    _upgrade_wp "$app_c" core update-db --network >/dev/null 2>&1 || log_warn "core update-db --network reported an issue"
-  else
-    _upgrade_wp "$app_c" core update-db >/dev/null 2>&1 || log_warn "core update-db reported an issue"
-  fi
-  # Update plugins individually (prevents single-plugin failures from breaking the cascade)
-  log_info "Updating plugins..."
-  local plugins
-  plugins="$(_upgrade_wp "$app_c" plugin list --update=available --field=name 2>/dev/null | tr -d '\r')"
-  if [ -n "$plugins" ]; then
-    local p
-    for p in $plugins; do
-      if [ "$p" = "wp-staging-pro" ]; then
-        log_info "  Skipping premium plugin: $p"
-        continue
-      fi
-      log_info "  Updating plugin: $p..."
-      _upgrade_wp "$app_c" plugin update "$p" >/dev/null 2>&1 || log_warn "  Plugin update failed: $p"
-    done
-  else
-    log_info "  All plugins already up to date."
-  fi
-
-  # Update themes individually
-  log_info "Updating themes..."
-  local themes
-  themes="$(_upgrade_wp "$app_c" theme list --update=available --field=name 2>/dev/null | tr -d '\r')"
-  if [ -n "$themes" ]; then
-    local t
-    for t in $themes; do
-      log_info "  Updating theme: $t..."
-      _upgrade_wp "$app_c" theme update "$t" >/dev/null 2>&1 || log_warn "  Theme update failed: $t"
-    done
-  else
-    log_info "  All themes already up to date."
-  fi
+  local is_ms=0
+  [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ] && is_ms=1
+  _run_updates "$dir" "$is_ms" _upgrade_wp "$app_c" || true
 
   # --- AFTER ---
   local core_after; core_after="$(_upgrade_wp "$app_c" core version 2>/dev/null | tr -d '\r')"
-  _upgrade_wp "$app_c" plugin list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.after.csv"
+  _upgrade_wp "$app_c" plugin list --fields="$WPSITE_PLUGIN_FIELDS" --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.after.csv"
   _upgrade_wp "$app_c" theme  list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/themes.after.csv"
+  _report_missed_updates "$dir"
+
+  # --- Reconcile plugins that fell inactive during the update ---
+  # This is the rehearsal, so this is where you WANT to find out: a plugin that
+  # cannot be restored here would have hit production in the next `wpsite apply`.
+  local reconcile_ok=1
+  _reconcile_active_plugins "$dir/plugins.before.csv" "$dir/plugins.after.csv" \
+    "$dir/update.log" "$dir/plugins.reconcile.txt" _upgrade_wp "$app_c" || reconcile_ok=0
 
   # --- Report ---
   echo >&2
   _upgrade_report "$client" "$stamp" "$core_before" "$core_after" "$dir" | tee "$dir/report.txt" >&2
   log_ok "Report saved: $dir/report.txt   (reset anytime with: wpsite build $client)"
 
+  [ -s "$dir/update.log" ] && log_info "WP-CLI output: $dir/update.log"
+
   # German client report and PDF compilation
-  _client_report_de "$client" "$stamp" "$core_before" "$core_after" "$dir" > "$dir/wartungsbericht.txt"
-  cupsfilter -i text/plain -o document-format=application/pdf "$dir/wartungsbericht.txt" > "$dir/wartungsbericht.pdf" 2>/dev/null || true
-  log_ok "Wartungsbericht (DE): $dir/wartungsbericht.txt (.pdf)"
+  _write_client_report_de "$client" "$stamp" "$core_before" "$core_after" "$dir"
 
   # --- Review: AFTER screenshots, smoke check, build + open comparison page ---
   if [ "$review" = 1 ]; then
@@ -245,4 +551,14 @@ cmd_upgrade() {
     log_ok "Comparison page: $dir/review.html"
     _open_file "$dir/review.html"
   fi
+
+  # A plugin we could not bring back is the one outcome that must not be silent:
+  # the same update is about to be replayed on production by `wpsite apply`.
+  if [ "$reconcile_ok" != 1 ]; then
+    echo >&2
+    log_error "One or more plugins stayed INACTIVE — see $dir/plugins.reconcile.txt"
+    log_error "Diagnose with $dir/update.log, then fix BEFORE running: wpsite apply $client"
+    return 1
+  fi
+  return 0
 }

@@ -26,6 +26,11 @@ _prod_wp() { # ssh_target wp_root wp-args...
   # Detect if the remote wp command is a shell script wrapper (like on Mittwald).
   # If so, run it directly; otherwise run with PHP memory & time overrides.
   local remote_cmd
+  # Host wp unusable → our uploaded phar (see _remote_wp_prepare); no sniffing needed.
+  if [ "${_WPSITE_WP_BUNDLED:-0}" = 1 ]; then
+    wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) $escaped_args --allow-root"
+    return
+  fi
   remote_cmd="wp_bin=\$(which wp 2>/dev/null || echo wp); if [ -f \"\$wp_bin\" ] && head -n1 \"\$wp_bin\" 2>/dev/null | grep -qE \"sh|bash\"; then wp $escaped_args --allow-root; else php -d memory_limit=512M -d max_execution_time=300 \"\$wp_bin\" $escaped_args --allow-root; fi"
   wpsite_ssh "$t" "cd '$root' && $remote_cmd"
 }
@@ -78,7 +83,7 @@ _prod_maintenance_off() { # ssh_target wp_root
 # Capture name,version,update for plugins+themes from prod into the given dir.
 _prod_versions() { # ssh_target wp_root dir suffix
   local t="$1" root="$2" dir="$3" sfx="$4"
-  _prod_wp "$t" "$root" plugin list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.$sfx.csv"
+  _prod_wp "$t" "$root" plugin list --fields="$WPSITE_PLUGIN_FIELDS" --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.$sfx.csv"
   _prod_wp "$t" "$root" theme  list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/themes.$sfx.csv"
 }
 
@@ -105,6 +110,7 @@ cmd_apply() {
 
   ssh_setup_mux
   trap _backup_cleanup EXIT
+  _remote_wp_prepare "$client"
 
   # 1) Fresh backup = rollback point. No backup -> we do not touch production.
   log_info "[1/5] Fresh production backup (rollback point)..."
@@ -120,6 +126,8 @@ cmd_apply() {
   dir="$(client_base "$client")/applies/$stamp"
   mkdir -p "$dir"
   local core_before; core_before="$(_prod_wp "$ssh_target" "$wp_root" core version 2>/dev/null | tr -d '\r')"
+  # Fresh update data first, so the before-snapshot (and thus the plan) isn't stale.
+  _refresh_update_cache "$dir/update.log" _prod_wp "$ssh_target" "$wp_root"
   _prod_versions "$ssh_target" "$wp_root" "$dir" before
 
   # 2) Maintenance mode on.
@@ -137,44 +145,18 @@ cmd_apply() {
   # 3) Upgrades on production (in place).
   log_info "[3/5] Updating core/plugins/themes on PRODUCTION..."
   local ok=1
-  _prod_wp "$ssh_target" "$wp_root" core update >/dev/null 2>&1 || { ok=0; log_warn "core update failed"; }
-  if [ "$is_ms" = 1 ]; then
-    _prod_wp "$ssh_target" "$wp_root" core update-db --network >/dev/null 2>&1 || { ok=0; log_warn "core update-db --network failed"; }
-  else
-    _prod_wp "$ssh_target" "$wp_root" core update-db >/dev/null 2>&1 || { ok=0; log_warn "core update-db failed"; }
-  fi
-  # Update plugins individually (prevents single-plugin failures from breaking the cascade)
-  log_info "Updating plugins on PRODUCTION..."
-  local plugins
-  plugins="$(_prod_wp "$ssh_target" "$wp_root" plugin list --update=available --field=name 2>/dev/null | tr -d '\r')"
-  if [ -n "$plugins" ]; then
-    local p
-    for p in $plugins; do
-      if [ "$p" = "wp-staging-pro" ]; then
-        log_info "  Skipping premium plugin: $p"
-        continue
-      fi
-      log_info "  Updating plugin: $p..."
-      _prod_wp "$ssh_target" "$wp_root" plugin update "$p" >/dev/null 2>&1 || { ok=0; log_warn "  Plugin update failed: $p"; }
-    done
-  else
-    log_info "  All plugins already up to date."
-  fi
-
-  # Update themes individually
-  log_info "Updating themes on PRODUCTION..."
-  local themes
-  themes="$(_prod_wp "$ssh_target" "$wp_root" theme list --update=available --field=name 2>/dev/null | tr -d '\r')"
-  if [ -n "$themes" ]; then
-    local t
-    for t in $themes; do
-      log_info "  Updating theme: $t..."
-      _prod_wp "$ssh_target" "$wp_root" theme update "$t" >/dev/null 2>&1 || { ok=0; log_warn "  Theme update failed: $t"; }
-    done
-  else
-    log_info "  All themes already up to date."
-  fi
+  _run_updates "$dir" "$is_ms" _prod_wp "$ssh_target" "$wp_root" || ok=0
   _prod_wp "$ssh_target" "$wp_root" cache flush           >/dev/null 2>&1 || true
+
+  # Restore plugins the update knocked out, while the site is still behind the
+  # maintenance page — a reactivation that fatals must not be visible to visitors.
+  # The post-update snapshot has to be taken here (not at [4]) so we can diff it.
+  _prod_versions "$ssh_target" "$wp_root" "$dir" after
+  _report_missed_updates "$dir"
+  if ! _reconcile_active_plugins "$dir/plugins.before.csv" "$dir/plugins.after.csv" \
+        "$dir/update.log" "$dir/plugins.reconcile.txt" _prod_wp "$ssh_target" "$wp_root"; then
+    ok=0
+  fi
 
   # 4) Maintenance mode off (always, even if an update failed — don't strand the site).
   log_info "[4/5] Maintenance mode OFF..."
@@ -182,13 +164,10 @@ cmd_apply() {
 
   # Report (reuses the local upgrade report renderer).
   local core_after; core_after="$(_prod_wp "$ssh_target" "$wp_root" core version 2>/dev/null | tr -d '\r')"
-  _prod_versions "$ssh_target" "$wp_root" "$dir" after
   _upgrade_report "$client (PRODUCTION)" "$stamp" "$core_before" "$core_after" "$dir" | tee "$dir/report.txt" >&2
 
   # German client report and PDF compilation for production
-  _client_report_de "$client (PRODUCTION)" "$stamp" "$core_before" "$core_after" "$dir" > "$dir/wartungsbericht.txt"
-  cupsfilter -i text/plain -o document-format=application/pdf "$dir/wartungsbericht.txt" > "$dir/wartungsbericht.pdf" 2>/dev/null || true
-  log_ok "Wartungsbericht (DE): $dir/wartungsbericht.txt (.pdf)"
+  _write_client_report_de "$client" "$stamp" "$core_before" "$core_after" "$dir" domain
 
   # 5) Verify the live site responds.
   log_info "[5/5] Verifying production responds..."
@@ -212,6 +191,8 @@ cmd_apply() {
   ssh_close_mux
   trap - EXIT
 
+  [ -s "$dir/update.log" ] && log_info "WP-CLI output: $dir/update.log"
+
   if [ "$ok" = 1 ] && [ "$code" = "200" ]; then
     log_ok "Production upgraded: $home (HTTP 200). Report: $dir/report.txt"
     return 0
@@ -221,5 +202,7 @@ cmd_apply() {
   log_error "Rollback point (DB + code): $backup_dir"
   log_error "To roll back manually: restore that backup's db.sql to prod and reinstall the"
   log_error "prior plugin/theme/core versions (see $dir/plugins.before.csv). Then re-check the site."
+  [ -s "$dir/plugins.reconcile.txt" ] \
+    && log_error "Plugin activation problems: $dir/plugins.reconcile.txt"
   return 1
 }

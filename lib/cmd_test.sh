@@ -37,7 +37,7 @@ cmd_test() {
         echo \"\$cmd: MISSING\"
       fi
     done
-  " 2>/dev/null)"
+  " 2>/dev/null || true)"
 
   local fail=0
   while IFS= read -r line; do
@@ -65,16 +65,26 @@ cmd_test() {
   # 4. Test WP-CLI and WordPress database connection
   log_info "[4/4] Testing Remote WP-CLI & WordPress Boot..."
   # Locate the wp binary on remote
-  local wp_bin; wp_bin="$(wpsite_ssh "$ssh_target" "which wp 2>/dev/null || echo wp")"
-  log_info "  Remote WP-CLI path: $wp_bin"
+  # Every capture below needs `|| true`: under `set -euo pipefail` a failing remote wp
+  # (e.g. Plesk's WP-Toolkit wrapper fataling with exit 255) made the assignment itself
+  # fail, aborting the whole test silently after the [4/4] header — no error, no verdict.
+  # Test the SAME wp-cli backup/apply will use (host wp, else wpsite's bundled phar).
+  _remote_wp_prepare "$client"
+  local wp_cmd; wp_cmd="$(_remote_wp_cmd)"
+  if [ "$_WPSITE_WP_BUNDLED" = 1 ]; then
+    log_info "  Remote WP-CLI: wpsite's bundled phar ~/$WPSITE_REMOTE_PHAR (host wp unusable)"
+  else
+    local wp_bin; wp_bin="$(wpsite_ssh "$ssh_target" "which wp 2>/dev/null || echo wp" || true)"
+    log_info "  Remote WP-CLI path: $wp_bin"
+  fi
 
   local wp_version
-  wp_version="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && wp core version --allow-root 2>/dev/null" | tr -d '\r')"
+  wp_version="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && $wp_cmd core version --allow-root 2>/dev/null" | tr -d '\r' || true)"
   if [ -n "$wp_version" ]; then
     log_ok "  WP-CLI can boot and connect to DB. WordPress Version: $wp_version"
   else
     # Try running it natively or check if there is an error
-    local raw_error; raw_error="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && wp core version --allow-root 2>&1")"
+    local raw_error; raw_error="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && $wp_cmd core version --allow-root 2>&1" || true)"
     log_error "  WP-CLI failed to execute or connect to WordPress database!"
     log_error "  Error output: $raw_error"
     fail=1

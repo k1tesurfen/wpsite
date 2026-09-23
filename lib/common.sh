@@ -335,6 +335,16 @@ _cloud_domain_from_meta() { # client
   return 0
 }
 
+# Production domain of a client (host only, no proto/www), as recorded by its
+# backups. This is what the CUSTOMER-facing report is named after and headed with —
+# the client id stays our internal reference. Falls back to the id when no backup
+# has recorded a domain yet.
+client_domain() { # client
+  local domain; domain="$(_cloud_domain_from_meta "$1")"
+  [ -n "$domain" ] || domain="$1"
+  printf '%s' "$domain"
+}
+
 # Backups live in a fixed subfolder INSIDE each domain's project folder — never at
 # the domain root. The rest of the domain folder (assets, layout, kunde input, …) is
 # the team's working folder and must never be touched by wpsite.
@@ -610,4 +620,63 @@ ssh_close_mux() {
     ssh -o ControlPath="$sock" -O exit _ 2>/dev/null || true
   done
   rm -rf "$WPSITE_SSH_CONTROL_DIR"
+}
+
+# --- Bundled WP-CLI fallback -------------------------------------------------------
+# Some hosts ship a `wp` that cannot run from our SSH login and offer no way to fix it.
+# checkdomain/Plesk (client gerfin): /usr/local/bin/wp is WP-Toolkit's wrapper, which
+# require_once's a file under /usr/local/psa that the chrooted shell cannot see — every
+# call fatals. `php` itself works there. So when the host's wp can't boot the site,
+# wpsite uploads its OWN wp-cli.phar (the host cache <base_dir>/.cache/wp-cli.phar, same
+# one builds use) into the remote $HOME and runs `php <phar>` instead. Detected, not
+# configured: no registry key. The host's wp stays the first choice because managed hosts'
+# wrappers (Mittwald) pick the site's PHP version, which a bare `php` might not.
+WPSITE_REMOTE_PHAR=".wpsite/wp-cli.phar"   # relative to the REMOTE $HOME
+_WPSITE_WP_BUNDLED=0                        # read by _prod_wp / _remote_wp_cmd
+_WPSITE_WP_PREPARED=""                      # client already probed in this process
+
+# Decide host-wp vs bundled phar for <client> and set _WPSITE_WP_BUNDLED. Call once per
+# command AFTER ssh_setup_mux (repeat calls for the same client are free). Never fails:
+# if neither wp-cli boots, it stays on the host's wp so the caller surfaces the real error.
+_remote_wp_prepare() { # client
+  local client="$1" t root cache want have_sum
+  [ "$_WPSITE_WP_PREPARED" = "$client" ] && return 0
+  _WPSITE_WP_PREPARED="$client"
+  _WPSITE_WP_BUNDLED=0
+  t="$(client_get "$client" ssh)"; root="$(client_get "$client" wp_root)"
+  wpsite_ssh "$t" "cd '$root' && wp core version --allow-root >/dev/null 2>&1" </dev/null && return 0
+
+  log_warn "$client: the host's wp-cli does not boot the site from this SSH login — trying wpsite's bundled wp-cli"
+  _wp_cli_cache_warm || { log_warn "  no local wp-cli.phar to upload (run: wpsite prefetch)"; return 0; }
+  cache="$(_wp_cli_cache)"
+  want="$(cksum < "$cache" | awk '{print $1 "-" $2}')"
+  # shellcheck disable=SC2016  # $HOME is the REMOTE one
+  have_sum="$(wpsite_ssh "$t" 'cksum < "$HOME/'"$WPSITE_REMOTE_PHAR"'" 2>/dev/null' </dev/null \
+    | awk '{print $1 "-" $2}' || true)"
+  if [ "$want" != "$have_sum" ]; then
+    log_info "  uploading wp-cli.phar to ~/$WPSITE_REMOTE_PHAR ..."
+    # shellcheck disable=SC2016
+    wpsite_ssh "$t" 'p="$HOME/'"$WPSITE_REMOTE_PHAR"'"; mkdir -p "$(dirname "$p")" && cat > "$p.tmp" && mv -f "$p.tmp" "$p"' < "$cache" \
+      || { log_warn "  could not upload wp-cli.phar to the remote home"; return 0; }
+  fi
+  _WPSITE_WP_BUNDLED=1
+  if wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) core version --allow-root >/dev/null 2>&1" </dev/null; then
+    log_warn "  using bundled wp-cli (~/$WPSITE_REMOTE_PHAR) for $client"
+  else
+    _WPSITE_WP_BUNDLED=0
+    log_warn "  the bundled wp-cli does not boot the site either — keeping the host's wp"
+  fi
+  return 0
+}
+
+# The remote command that invokes wp-cli, as a string for a remote shell (the $HOME
+# expands on the SERVER). Plain `wp` unless _remote_wp_prepare selected the bundled phar.
+_remote_wp_cmd() {
+  if [ "${_WPSITE_WP_BUNDLED:-0}" = 1 ]; then
+    # shellcheck disable=SC2016  # $HOME is the REMOTE one
+    printf 'php -d memory_limit=512M -d max_execution_time=300 "$HOME/%s"' "$WPSITE_REMOTE_PHAR"
+  else
+    printf 'wp'
+  fi
+  return 0
 }

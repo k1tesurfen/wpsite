@@ -51,8 +51,10 @@ setup() {
 
 @test "_resolve_wp_image: returns the preferred tag when nothing resolves (offline)" {
   docker() { return 1; }
-  run _resolve_wp_image 7.0 8.1
-  [ "$output" = "wordpress:7.0-php8.1-apache" ]
+  # With no patch component the fallback IS the preferred tag; stdout only, since the
+  # "cannot probe" notice goes to stderr and `run` would merge the two.
+  local tag; tag="$(_resolve_wp_image 7.0 8.1 2>/dev/null)"
+  [ "$tag" = "wordpress:7.0-php8.1-apache" ]
 }
 
 @test "expand_tilde: expands leading ~/" {
@@ -144,4 +146,86 @@ setup() {
   [ "$(config_dev_suffix)" = "test" ]
   [ "$(WPSITE_DEV_SUFFIX=dev.test config_dev_suffix)" = "dev.test" ]
   [ "$(WPSITE_DEV_SUFFIX=.dev.test config_dev_suffix)" = "dev.test" ]
+}
+
+# --- _wp_minor / image candidate ordering -----------------------------------------
+# Regression: a 6.9.8/php8.0 site resolved to wordpress:php8.0-apache, which is frozen
+# at WP 6.4.1 — core OLDER than the imported DB, so every frontend page fatalled on a
+# post-6.4 core function (Yoast: wp_is_serving_rest_request) while wp-admin still ran.
+
+@test "_wp_minor: strips the patch level, passes a series through" {
+  [ "$(_wp_minor 6.9.8)" = "6.9" ]
+  [ "$(_wp_minor 6.9)"   = "6.9" ]
+  [ "$(_wp_minor 7)"     = "7" ]
+}
+
+@test "candidates: WP minor series comes before any PHP-pinned tag" {
+  run _wp_image_candidates 6.9.8 8.0
+  [ "$status" -eq 0 ]
+  local list="$output"
+  # both present
+  echo "$list" | grep -qx 'wordpress:6.9-apache'
+  echo "$list" | grep -qx 'wordpress:php8.0-apache'
+  # and the series tag is ranked higher (earlier) than the PHP-only fallback
+  local series php_only
+  series="$(echo "$list" | grep -nx 'wordpress:6.9-apache'   | cut -d: -f1)"
+  php_only="$(echo "$list" | grep -nx 'wordpress:php8.0-apache' | cut -d: -f1)"
+  [ "$series" -lt "$php_only" ]
+}
+
+@test "candidates: exact match first, latest last, no empty tags without a version" {
+  run _wp_image_candidates 6.9.8 8.0
+  [ "$(echo "$output" | head -1)" = "wordpress:6.9.8-php8.0-apache" ]
+  [ "$(echo "$output" | tail -1)" = "wordpress:latest" ]
+  run _wp_image_candidates "" ""
+  [ "$output" = "wordpress:latest" ]
+}
+
+# --- image resolution: local cache, registry probe, rate-limit fallback -----------
+# `docker` is shadowed by a shell function, so these stay hermetic (no daemon, no net).
+
+@test "_wp_image_fallback: never pins a patch tag (may lag WP, e.g. 7.0.5)" {
+  [ "$(_wp_image_fallback 7.0.5 8.2)" = "wordpress:7.0-php8.2-apache" ]
+  [ "$(_wp_image_fallback 6.9.8 "")"  = "wordpress:6.9-apache" ]
+  [ "$(_wp_image_fallback "" 8.2)"    = "wordpress:php8.2-apache" ]
+  [ "$(_wp_image_fallback "" "")"     = "wordpress:latest" ]
+}
+
+@test "_resolve_wp_image: an already-pulled image wins without any registry call" {
+  docker() {
+    case "$1 $2" in
+      "image inspect") [ "$3" = "wordpress:6.9-apache" ] ;;   # only this one is local
+      "manifest inspect") echo "PROBED" >&3; return 0 ;;      # must never run
+      *) return 1 ;;
+    esac
+  }
+  run _resolve_wp_image 6.9.8 8.0
+  [ "$output" = "wordpress:6.9-apache" ]
+}
+
+@test "_resolve_wp_image: rate-limited probe falls back to the series tag, not the patch tag" {
+  docker() {
+    case "$1 $2" in
+      "image inspect") return 1 ;;
+      "manifest inspect") echo "toomanyrequests: You have reached your unauthenticated pull rate limit." >&2; return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  # this path logs to stderr, which `run` would merge into $output — capture stdout only
+  local tag; tag="$(_resolve_wp_image 7.0.5 8.2 2>/dev/null)"
+  [ "$tag" = "wordpress:7.0-php8.2-apache" ]
+}
+
+@test "_resolve_wp_image: a genuinely absent tag just moves to the next candidate" {
+  docker() {
+    case "$1 $2" in
+      "image inspect") return 1 ;;
+      "manifest inspect")
+        if [ "$3" = "wordpress:7.0-apache" ]; then return 0; fi
+        echo "manifest unknown" >&2; return 1 ;;
+      *) return 1 ;;
+    esac
+  }
+  run _resolve_wp_image 7.0.5 ""
+  [ "$output" = "wordpress:7.0-apache" ]
 }

@@ -78,6 +78,9 @@ Commands:
   review  <client>    Re-open the latest upgrade comparison page in the browser
   apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
                       typed confirmation; irreversible — rehearse first)
+  report  <client> [<id>]   Regenerate a maintenance report's PDF from its .txt
+                      (edit the .txt first; newest apply by default)
+          --upgrade <id> --list --no-open
   redirect <sub> <client>   Manage .htaccess redirects on production (replaces the
                       Redirection plugin): list | add | import | migrate | remove
   destroy <site>      Remove a replica or dev site (containers + DB volume + files)
@@ -152,6 +155,7 @@ main() {
     upgrade) cmd_upgrade "$@" ;;
     review)  cmd_review "$@" ;;
     apply)   cmd_apply "$@" ;;
+    report)  cmd_report "$@" ;;
     redirect) cmd_redirect "$@" ;;
     destroy) cmd_destroy "$@" ;;
     prune)   cmd_prune "$@" ;;
