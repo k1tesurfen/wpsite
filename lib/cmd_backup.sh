@@ -153,16 +153,31 @@ _backup_remote_script() {
 REMOTE_EOF
 }
 
+# The remote staging dir for backups: clients.<c>.remote_tmp (wpsite's registry), default
+# /tmp. Shared hosts (Strato et al.) cap /tmp far below the webspace quota — point it at
+# e.g. ~/.wpsite_tmp instead. A leading ~ is resolved on the REMOTE (no eval); the result
+# is absolute. Also used by apply's preflight to check the dir before anything starts.
+_remote_staging_base() { # client ssh_target
+  local base; base="$(wclient_get "$1" remote_tmp)"
+  [ -n "$base" ] || base="/tmp"
+  # shellcheck disable=SC2088,SC2016  # ~ is a literal case pattern; $HOME is the REMOTE's
+  case "$base" in
+    "~"|"~/"*) base="$(wpsite_ssh "$2" 'printf %s "$HOME"' </dev/null || true)${base#\~}" ;;
+  esac
+  printf '%s' "$base"
+}
+
 # Back up a single client. Returns non-zero (without die-ing) so --all can carry
 # on to the next client. Assumes ssh mux is already set up by the caller.
 _backup_one_client() { # client full_flag persist_flag
   local client="$1" full="$2" persist="${3:-0}"
 
+  access_has "$client" || { log_error "$client: no production access in mandos (mandos client add $client)"; return 1; }
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"
   wp_root="$(client_get "$client" wp_root)"
-  [ -n "$ssh_target" ] || { log_error "$client: clients.$client.ssh not set"; return 1; }
-  [ -n "$wp_root" ]    || { log_error "$client: clients.$client.wp_root not set"; return 1; }
+  [ -n "$ssh_target" ] || { log_error "$client: no ssh target in mandos"; return 1; }
+  [ -n "$wp_root" ]    || { log_error "$client: no wp_root in mandos"; return 1; }
 
   local timestamp run_id remote_base remote_tmp sweep_base dest mode="placeholder" full_flag=""
   timestamp="$(date +%Y%m%d_%H%M%S)"
@@ -170,15 +185,7 @@ _backup_one_client() { # client full_flag persist_flag
   # Staging dir on the remote. Default /tmp; overridable per client via
   # clients.<c>.remote_tmp. Shared hosts (Strato et al.) cap /tmp far below the
   # webspace quota — point this at e.g. ~/.wpsite_tmp (above the docroot) instead.
-  remote_base="$(client_get "$client" remote_tmp)"
-  [ -n "$remote_base" ] || remote_base="/tmp"
-  # Resolve a leading ~ on the REMOTE side (no eval; the ssh mux is already up).
-  # Keep the absolute path locally — it's used below for download + cleanup too.
-  # ~ is a literal case pattern here; $HOME is resolved on the REMOTE (single-quoted).
-  # shellcheck disable=SC2088,SC2016
-  case "$remote_base" in
-    "~"|"~/"*) remote_base="$(wpsite_ssh "$ssh_target" 'printf %s "$HOME"')${remote_base#\~}" ;;
-  esac
+  remote_base="$(_remote_staging_base "$client" "$ssh_target")"
   remote_tmp="${remote_base%/}/${run_id}"
   # Only sweep stale staging dirs when NOT on /tmp (the OS reaps /tmp itself).
   sweep_base=""
@@ -345,14 +352,20 @@ cmd_backup() {
   config_require_registry
 
   # Determine the target client list (sequential — one remote server at a time).
-  local clients=() c
+  local clients=() c new_client=0
   if [ "$all" = 1 ]; then
     [ -z "$client" ] || die "Use either a <client> or --all, not both."
     while IFS= read -r c; do [ -n "$c" ] && clients+=("$c"); done < <(config_clients)
     [ "${#clients[@]}" -gt 0 ] || die "No clients configured."
   else
     [ -n "$client" ] || die "Specify a <client>, or --all to back up every client."
-    require_client "$client"
+    # The ONE place a client joins wpsite: an ID mandos knows but wpsite doesn't is
+    # registered after its first successful backup (registries are not linked).
+    if ! wclient_has "$client"; then
+      access_has "$client" || die "Client '$client' not found (neither in wpsite nor in mandos)."
+      new_client=1
+      log_info "'$client' is new in wpsite — it is registered once this first backup succeeds."
+    fi
     clients=("$client")
   fi
 
@@ -377,6 +390,10 @@ cmd_backup() {
     return 1
   fi
   [ "$total" -gt 1 ] && log_ok "Backed up all $ok client(s)."
+  if [ "$new_client" = 1 ]; then
+    wclient_register "$client"
+    log_ok "Registered '$client' in wpsite ($(wpsite_team_file))."
+  fi
   return 0
 }
 

@@ -64,6 +64,58 @@ _wp_image_candidates() { # wp php
 # the frontend as soon as a plugin calls a core function that core doesn't have yet
 # — and wp-admin often still works, so it looks like "only the frontend is broken".
 # Warn loudly instead of leaving that to be discovered in the browser.
+# --- Rehearsal fidelity (HARDENING-PLAN.md Phase 7) ---------------------------------
+# The replica must start from EXACTLY production's state, or the rehearsal plans a
+# different run than apply will do. Two ways the image made it differ (arbeitsplatz-erde:
+# replica core 7.0 vs production 7.0.6; akismet/hello/twentytwenty* only on the replica):
+
+# 1. The official image's entrypoint copies its bundled plugins/themes (akismet, hello.php,
+#    twentytwenty*) into the bind-mounted wp-content when they are missing. Record what the
+#    BACKUP brought before the first `up -d`, and afterwards remove exactly what appeared —
+#    only the image can have added it, so nothing from the backup is ever touched.
+_content_snapshot() { # wp_content_dir → one "plugins/x" / "themes/y" per line
+  local d="$1" k e
+  for k in plugins themes; do
+    [ -d "$d/$k" ] || continue
+    for e in "$d/$k"/*; do [ -e "$e" ] && printf '%s/%s\n' "$k" "$(basename "$e")"; done
+  done
+  return 0
+}
+
+_strip_image_extras() { # wp_content_dir snapshot_file
+  local d="$1" snap="$2" e n=0
+  [ -f "$snap" ] || return 0
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue
+    grep -qxF "$e" "$snap" && continue
+    rm -rf "${d:?}/$e" && n=$((n + 1))
+    log_info "  removed image-bundled $e (not on production)"
+  done < <(_content_snapshot "$d")
+  [ "$n" -gt 0 ] && log_ok "Replica content matches the backup (removed $n image-bundled item(s))."
+  return 0
+}
+
+# 2. Images exist per minor series (7.0), not for every patch release (7.0.6), so the
+#    replica's core could trail production. Download the exact version over it (core files
+#    only: --skip-content leaves wp-content alone). Needs the network; offline it warns and
+#    keeps the image's core — _warn_if_core_older still flags a real series gap.
+_pin_core_version() { # app_container prod_wp_version
+  local app="$1" want="$2" have
+  [ -n "$want" ] || return 0
+  have="$(docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
+            core version 2>/dev/null | tr -d '\r' || true)"
+  [ -n "$have" ] && [ "$have" != "$want" ] || return 0
+  log_info "Pinning replica core to production's exact version: $have → $want..."
+  if docker exec "$app" wp --allow-root --path=/var/www/html --skip-plugins --skip-themes \
+       core download --version="$want" --force --skip-content >/dev/null 2>&1; then
+    log_ok "Replica core is now $want (same as production)."
+  else
+    log_warn "Could not download WordPress $want (offline?) — the replica keeps core $have."
+    log_warn "The rehearsal then starts from $have, not production's $want."
+  fi
+  return 0
+}
+
 _warn_if_core_older() { # app_container prod_wp_version
   local app="$1" want="$2" have
   [ -n "$want" ] || return 0
@@ -795,7 +847,7 @@ cmd_build() {
     || die "Backup at $latest is incomplete (missing db.sql or wp-content.tar.gz)."
   log_info "Using backup: $(basename "$latest")$([ -z "$backup_id" ] && echo ' (newest)')"
 
-  _build_from_backup "$latest" "$client" "$local_host" "$(client_get "$client" deactivate_plugins)"
+  _build_from_backup "$latest" "$client" "$local_host" "$(wclient_get "$client" deactivate_plugins)"
 }
 
 # Given a chosen backup dir, a target site name and its local host, produce a
@@ -915,6 +967,9 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
   _proxy_ensure
   _mail_ensure
 
+  # What the BACKUP brought — so the image's bundled extras can be removed afterwards.
+  _content_snapshot wp-content > .wpsite-content-before
+
   log_info "Starting containers..."
   docker compose -p "$project" up -d
 
@@ -946,8 +1001,16 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
     _ms_fix_domains "$db_c" "$local_host" "$sites_csv" "$ms_ns" "$table_prefix" >/dev/null 2>&1 || log_warn "network domain SQL fix had issues"
   fi
 
+  # Rehearsal fidelity: exactly production's plugins/themes and core version.
+  _strip_image_extras wp-content .wpsite-content-before
+  rm -f .wpsite-content-before
+
+  local wpcli_ok=1
+  _ensure_wp_cli "$app_c" || wpcli_ok=0
+  if [ "$wpcli_ok" = 1 ]; then _pin_core_version "$app_c" "$wp_version"; fi
+
   # --- Rewrite production domain → local replica URL (uses captured URLs) ---
-  if ! _ensure_wp_cli "$app_c"; then
+  if [ "$wpcli_ok" != 1 ]; then
     log_warn "Could not install wp-cli in $app_c; skipped domain rewrite + sanitization."
     log_warn "Site may still reference production URLs."
   elif [ "$is_ms" = "1" ]; then

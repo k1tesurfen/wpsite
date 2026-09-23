@@ -11,6 +11,7 @@ setup() {
   printf 'base_dir: %s\n' "$BASE" > "$CFG"
   export WPSITE_CONFIG="$CFG"
   export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_build.sh"    # _wp_cli_cache(_warm), WPSITE_DB_IMAGE
   source "$REPO/lib/cmd_proxy.sh"    # WPSITE_PROXY_IMAGE

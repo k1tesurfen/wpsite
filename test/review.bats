@@ -17,7 +17,7 @@ setup() {
 }
 
 @test "_review_pages: configured review_pages, home always first" {
-  client_get() { [ "$2" = "review_pages" ] && printf '/kontakt\n/referenzen\n'; return 0; }
+  wclient_get() { [ "$2" = "review_pages" ] && printf '/kontakt\n/referenzen\n'; return 0; }
   run _review_pages acme app http://acme.test
   [ "$(printf '%s\n' "$output" | sed -n 1p)" = "http://acme.test" ]
   [[ "$output" == *"http://acme.test/kontakt"* ]]
@@ -25,7 +25,7 @@ setup() {
 }
 
 @test "_review_pages: auto-picks via wp-cli when unconfigured, dedups home" {
-  client_get() { return 0; }   # nothing configured
+  wclient_get() { return 0; }   # nothing configured
   _upgrade_wp() { printf 'http://acme.test/\nhttp://acme.test/a/\nhttp://acme.test/b/\n'; }  # --field=url, no header
   run _review_pages acme app http://acme.test
   [[ "$output" == *"http://acme.test/a/"* ]]
@@ -62,14 +62,14 @@ setup() {
 }
 
 @test "_review_dismiss: built-in consent selectors present by default" {
-  client_get() { return 0; }   # no per-client review_dismiss
+  wclient_get() { return 0; }   # no per-client review_dismiss
   run _review_dismiss acme
   [[ "$output" == *"#usercentrics-root"* ]]   # Usercentrics
   [[ "$output" == *".ccm-root"* ]]            # CCM19
 }
 
 @test "_review_dismiss: per-client selectors are appended to the defaults" {
-  client_get() { [ "$2" = "review_dismiss" ] && printf '#my-banner\n.foo-consent\n'; return 0; }
+  wclient_get() { [ "$2" = "review_dismiss" ] && printf '#my-banner\n.foo-consent\n'; return 0; }
   run _review_dismiss acme
   [[ "$output" == *"#usercentrics-root"* ]]
   [[ "$output" == *"#my-banner"* ]]
@@ -87,6 +87,7 @@ setup() {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
   export WPSITE_CONFIG="$REPO/test/fixtures/wpsite.yml"
   export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   run cmd_review acme
   [ "$status" -ne 0 ]
   [[ "$output" == *"No review found"* ]]

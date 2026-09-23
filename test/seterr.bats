@@ -137,18 +137,19 @@ cstrict() {
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
 }
 
-@test "_client_check_cloud_folder: bare statement safe (no cloud_base + missing folder)" {
+@test "wpsite registry helpers: bare statements safe (missing file, missing keys)" {
   command -v yq >/dev/null 2>&1 || skip "yq not installed"
-  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" \
-    MANDOS_BIN="$REPO/test/fixtures/mandos-stub" bash -c 'set -euo pipefail
-    printf "base_dir: %s/root\ncloud_base: %s/cloud\n" "$TMP" "$TMP" > "$TMP/c.yml"
-    mkdir -p "$TMP/cloud"
-    export WPSITE_CONFIG="$TMP/c.yml"
+  run env REPO="$REPO" TMP="$BATS_TEST_TMPDIR" bash -c 'set -euo pipefail
+    printf "base_dir: %s/root\n" "$TMP" > "$TMP/c.yml"
+    export WPSITE_CONFIG="$TMP/c.yml" WPSITE_TEAM_CONFIG="$TMP/nope/w.yml" MANDOS_BIN="$TMP/absent"
     source "$REPO/lib/common.sh"
-    source "$REPO/lib/cmd_new.sh"
-    source "$REPO/lib/cmd_client.sh"
-    _client_check_cloud_folder ""            # early return (empty)
-    _client_check_cloud_folder does-not-exist  # warn path, still returns 0
+    wclient_list; wclient_get acme remote_tmp; wclient_map_keys acme hold_plugins
+    wclient_map_get acme hold_plugins x; wsetting_get test_mail_to; access_clients
+    x="$(wclient_get acme deactivate_plugins)"
+    wclient_has acme || true; access_has acme || true
+    export WPSITE_TEAM_CONFIG="$TMP/w.yml"
+    wclient_set acme remote_tmp "~/t"; wclient_unset acme nope; wclient_map_del acme hold_plugins x
+    wclient_register acme; wclient_forget zed
     echo __REACHED__'
   [ "$status" -eq 0 ]; [[ "$output" == *__REACHED__* ]]
 }

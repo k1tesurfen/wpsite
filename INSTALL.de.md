@@ -152,19 +152,23 @@ Es stellt ein paar Fragen. Genau das machst du bei jeder:
    Ablagen → 01_Projekte** und finde den Ordner **`LIVE_WEB`**. **Zieh diesen Ordner ins
    Terminal-Fenster** und drücke **Return**.
 
-4. **Deinen SSH-Schlüssel erstellen** (nur beim ersten Mal): Es erstellt einen sicheren
-   „Schlüssel“, damit du die Kundenserver erreichst. Wenn es nach einer **passphrase**
-   fragt, ist die einfachste Wahl, **zweimal Return** zu drücken (keine Passphrase). Dann
-   geht es weiter.
+Am Ende meldet es, ob beide geteilten Registries erreichbar sind (mandos für den Zugang,
+wpsites eigene für die WordPress-Einstellungen).
 
-5. **Verbindung zu jedem Kunden** → Für jeden Kunden fragt es evtl.:
+4. **Dein SSH-Zugang zu den Kundenservern** ist Sache von mandos (wpsite installiert keine
+   Schlüssel). Für jeden Kunden, mit dem du arbeitest:
+
+   ```bash
+   mandos client setup-key <kunde>
+   ```
+
+   - Beim ersten Mal erstellt es deinen Schlüssel: Fragt es nach einer **passphrase**,
+     **zweimal Return** drücken (keine Passphrase).
    - *„Are you sure you want to continue connecting?“* → **`yes`** tippen und Return drücken.
    - Ein **Passwort für diesen Server** → gib es ein, falls du es hast (frag Beren, wenn
-     unsicher). Fehlt dir das Passwort eines Servers, wird dieser Kunde übersprungen — die
-     anderen funktionieren trotzdem, und du kannst ihn später mit `wpsite setup --keys-only`
-     nachholen.
+     unsicher).
 
-Am Ende listet es auf, welche Kunden bereit sind. 🎉
+Dann bist du eingerichtet. 🎉
 
 Alles prüfen:
 

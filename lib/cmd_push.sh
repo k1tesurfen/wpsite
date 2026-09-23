@@ -125,7 +125,7 @@ cmd_push() {
   # The dev box has no client registry, so the per-client sanitize list travels as a
   # flag: the knowledge stays here, and the dev box just receives slugs.
   local deact remote_cmd
-  deact="$(client_get "$client" deactivate_plugins | tr '\n' ' ' | sed 's/ *$//')"
+  deact="$(wclient_get "$client" deactivate_plugins | tr '\n' ' ' | sed 's/ *$//')"
   remote_cmd="wpsite clone $(printf '%q %q' "$client" "$devname") --backup $(printf '%q' "$id")"
   [ -n "$deact" ] && remote_cmd="$remote_cmd --deactivate $(printf '%q' "$deact")"
   [ "$replace" = 1 ] && remote_cmd="wpsite destroy $(printf '%q' "$devname") >/dev/null 2>&1; $remote_cmd"

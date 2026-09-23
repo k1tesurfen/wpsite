@@ -38,7 +38,7 @@ cmd_new() {
     while :; do
       name="$(_prompt "Site name (letters, digits, hyphens)")"
       if ! _valid_site_name "$name"; then log_warn "Invalid name. Use lowercase letters, digits and hyphens."; continue; fi
-      if [ -n "$(target_kind "$name")" ]; then log_warn "'$name' already exists. Pick another."; continue; fi
+      if _name_taken "$name"; then log_warn "'$name' already exists. Pick another."; continue; fi
       break
     done
     wp="$(_prompt "WordPress version (blank = latest)" "$wp")"
@@ -47,7 +47,7 @@ cmd_new() {
   fi
 
   _valid_site_name "$name" || die "Invalid site name '$name' (use lowercase letters, digits, hyphens)."
-  [ -z "$(target_kind "$name")" ] || die "'$name' already exists as a $(target_kind "$name"). Choose another name."
+  if _name_taken "$name"; then die "'$name' already exists as a $(target_kind "$name" | grep . || echo "mandos client"). Choose another name."; fi
 
   : "${php:=8.2}"
   : "${host:=$name.$(config_dev_suffix)}"

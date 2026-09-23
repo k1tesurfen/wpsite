@@ -418,7 +418,7 @@ _redirect_cmd_list() {
       *)  if [ -z "$client" ]; then client="$1"; else die "Too many arguments."; fi; shift ;;
     esac
   done
-  config_require_registry; require_client "$client"
+  config_require_registry; require_client "$client"; require_access "$client"
   local t root
   t="$(client_get "$client" ssh)"; root="$(client_get "$client" wp_root)"
   [ -n "$t" ] && [ -n "$root" ] || die "clients.$client.ssh / wp_root not set."
@@ -475,7 +475,7 @@ _redirect_cmd_add() {
   [ -n "$client" ] && [ -n "$source" ] && [ -n "$target" ] \
     || die "Usage: wpsite redirect add <client> <source> <target> [--code 301|302|307|308] [--yes]"
   case "$code" in 301|302|307|308) : ;; *) die "Invalid --code: $code (use 301|302|307|308)." ;; esac
-  config_require_registry; require_client "$client"
+  config_require_registry; require_client "$client"; require_access "$client"
 
   local nf; nf="$(mktemp)"
   printf '%s\t%s\t%s\t0\n' "$source" "$target" "$code" > "$nf"
@@ -502,7 +502,7 @@ _redirect_cmd_import() {
   [ -n "$client" ] && [ -n "$file" ] \
     || die "Usage: wpsite redirect import <client> <file.csv> [--replace] [--deactivate-plugin] [--yes]"
   [ -f "$file" ] || die "File not found: $file"
-  config_require_registry; require_client "$client"
+  config_require_registry; require_client "$client"; require_access "$client"
 
   local nf skip nnew
   nf="$(mktemp)"
@@ -537,7 +537,7 @@ _redirect_cmd_migrate() {
     esac
   done
   [ -n "$client" ] || die "Usage: wpsite redirect migrate <client> [--replace] [--deactivate-plugin] [--yes]"
-  config_require_registry; require_client "$client"
+  config_require_registry; require_client "$client"; require_access "$client"
 
   local nf skip nnew
   nf="$(mktemp)"
@@ -582,7 +582,7 @@ _redirect_cmd_remove() {
     esac
   done
   [ -n "$client" ] && [ -n "$source" ] || die "Usage: wpsite redirect remove <client> <source> [--yes]"
-  config_require_registry; require_client "$client"
+  config_require_registry; require_client "$client"; require_access "$client"
   _redirect_commit "$client" remove "$source"
 }
 

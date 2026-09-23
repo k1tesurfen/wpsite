@@ -169,34 +169,30 @@ _upgrade_report() { # client stamp core_before core_after dir
     echo "WordPress core:  $cb → $ca"
   fi
   echo
+  local oc="$dir/updates.outcome.tsv" client_id="${client%% *}"
   echo "Plugins:"
-  _report_section "$dir/plugins.before.csv" "$dir/plugins.after.csv"
+  if [ -f "$oc" ]; then _report_outcome "$oc" plugin "$client_id"
+  else _report_section "$dir/plugins.before.csv" "$dir/plugins.after.csv"; fi
   echo
   echo "Themes:"
-  _report_section "$dir/themes.before.csv" "$dir/themes.after.csv"
+  if [ -f "$oc" ]; then _report_outcome "$oc" theme "$client_id"
+  else _report_section "$dir/themes.before.csv" "$dir/themes.after.csv"; fi
+  [ -f "$oc" ] && _report_manual "$oc"
   _report_reconcile "$dir/plugins.reconcile.txt"
 }
 
 _report_section_de() { # before.csv after.csv
-  local before="$1" after="$2" tmp changed pending
+  # The CUSTOMER report lists only what was actually updated. Held / no-package / manual /
+  # failed items are left out on purpose (internal matters, see report.txt), and it never
+  # claims "bereits aktuell" — WP-CLI can't see every update (e.g. Greyd's theme).
+  local before="$1" after="$2" tmp changed
   tmp="$(mktemp -d)"
   tail -n +2 "$before" 2>/dev/null | sort -t, -k1,1 > "$tmp/b"
   tail -n +2 "$after"  2>/dev/null | sort -t, -k1,1 > "$tmp/a"
-  # name, before-version, after-version  → list where the version changed
   changed="$(join -t, -j1 -o '1.1,1.2,2.2' "$tmp/b" "$tmp/a" 2>/dev/null \
     | awk -F, '$2!=$3 {printf "    ✓ %s: %s —> %s\n",$1,$2,$3}')"
-  # after rows still showing an available update
-  pending="$(awk -F, '$3=="available" {printf "    ! %s (%s) — Update ausstehend (manuelle Freigabe erforderlich)\n",$1,$2}' "$tmp/a")"
   rm -rf "$tmp"
-  if [ -n "$changed" ]; then 
-    printf '%s\n' "$changed"
-  else 
-    echo "    Keine Änderungen (bereits aktuell)"
-  fi
-  if [ -n "$pending" ]; then
-    echo
-    printf '%s\n' "$pending"
-  fi
+  if [ -n "$changed" ]; then printf '%s\n' "$changed"; else echo "    Keine Änderungen"; fi
   return 0
 }
 
@@ -214,6 +210,22 @@ _plugin_update_skip_reason() { # slug
     # wp.org plugin that happens to share the slug.
     aule)           printf 'our own plugin, updated by hand' ;;
   esac
+  return 0
+}
+
+# The client a run belongs to (upgrade/apply set it) — for its hold list.
+_WPSITE_RUN_CLIENT=""
+
+# Why <name> must not be auto-updated in this run, or empty. The global list above
+# (plugins only) + the client's hold list in wpsite's registry (`wpsite hold`), which
+# covers plugin AND theme slugs.
+_update_skip_reason() { # kind name
+  local r=""
+  [ "$1" = plugin ] && r="$(_plugin_update_skip_reason "$2")"
+  if [ -z "$r" ] && [ -n "$_WPSITE_RUN_CLIENT" ] && wclient_map_has "$_WPSITE_RUN_CLIENT" hold_plugins "$2"; then
+    r="held: $(wclient_map_get "$_WPSITE_RUN_CLIENT" hold_plugins "$2")"
+  fi
+  printf '%s' "$r"
   return 0
 }
 
@@ -287,16 +299,34 @@ _update_plan() { # kind before_csv logfile runner...
   return 0
 }
 
+# Optional hook run after EVERY update step (core, update-db, each plugin/theme). `apply`
+# sets it to re-arm the maintenance locks (WordPress's updater deletes .maintenance after
+# each update); the local rehearsal leaves it empty.
+_WPSITE_STEP_HOOK=""
+_update_step_done() { [ -z "$_WPSITE_STEP_HOOK" ] || "$_WPSITE_STEP_HOOK" || true; return 0; }
+
+# Does the site still boot? `wp eval` loads every active plugin, so a fatal surfaces here.
+_site_boots() { # runner...
+  "$@" eval 'echo "WPSITE_BOOT_OK";' 2>/dev/null < /dev/null | grep -q WPSITE_BOOT_OK
+}
+
+# Set by _run_updates when it stopped because the site no longer boots.
+_WPSITE_UPDATES_BROKEN=0
+
 # Core, plugin and theme updates — ONE implementation for the local rehearsal
 # (`_upgrade_wp <container>`) and production (`_prod_wp <target> <root>`), so the two
 # can't drift. Needs <dir>/plugins.before.csv + themes.before.csv already written.
-# Updates run one-by-one (a failing plugin must not abort the cascade).
-# Returns non-zero when any update call failed; callers decide how loud to be.
+# Updates run one-by-one (a failing plugin must not abort the cascade) — BUT after any
+# failed update the site is boot-checked: still boots → carry on; doesn't → STOP (no
+# further updates on a broken site), _WPSITE_UPDATES_BROKEN=1, return 2.
+# Returns 0 all fine, 1 some update failed, 2 stopped because the site no longer boots.
 _run_updates() { # dir is_multisite runner...
   local dir="$1" is_ms="$2"; shift 2
   local logf="$dir/update.log" rc=0 x skip list
+  _WPSITE_UPDATES_BROKEN=0
   log_info "Updating WordPress core..."
   _ulog "$logf" "core update" "$@" core update || { rc=1; log_warn "core update failed"; }
+  _update_step_done
   # Multisite migrates ALL subsites' tables → needs --network (which errors on single sites).
   if [ "$is_ms" = 1 ]; then
     _ulog "$logf" "core update-db --network" "$@" core update-db --network \
@@ -304,30 +334,211 @@ _run_updates() { # dir is_multisite runner...
   else
     _ulog "$logf" "core update-db" "$@" core update-db || { rc=1; log_warn "core update-db failed"; }
   fi
+  _update_step_done
+  if [ "$rc" != 0 ] && ! _site_boots "$@"; then
+    _ulog_note "$logf" "STOP: site does not boot after the core update — no plugin/theme updates run"
+    log_error "The site does not boot after the core update — stopping all further updates."
+    _WPSITE_UPDATES_BROKEN=1; return 2
+  fi
   _refresh_update_cache "$logf" "$@"
 
-  log_info "Updating plugins..."
-  list="$(_update_plan plugin "$dir/plugins.before.csv" "$logf" "$@")"
-  [ -n "$list" ] || log_info "  All plugins already up to date."
-  for x in $list; do
-    skip="$(_plugin_update_skip_reason "$x")"
-    if [ -n "$skip" ]; then
-      log_info "  Skipping $x ($skip)"
-      _ulog_note "$logf" "plugin skip: $x ($skip)"
-      continue
-    fi
-    log_info "  Updating plugin: $x..."
-    _ulog "$logf" "plugin update $x" "$@" plugin update "$x" || { rc=1; log_warn "  Plugin update failed: $x"; }
-  done
-
-  log_info "Updating themes..."
-  list="$(_update_plan theme "$dir/themes.before.csv" "$logf" "$@")"
-  [ -n "$list" ] || log_info "  All themes already up to date."
-  for x in $list; do
-    log_info "  Updating theme: $x..."
-    _ulog "$logf" "theme update $x" "$@" theme update "$x" || { rc=1; log_warn "  Theme update failed: $x"; }
+  local kind out ec
+  for kind in plugin theme; do
+    log_info "Updating ${kind}s..."
+    # What WordPress knows BEFORE updating (an empty update_package = no download link —
+    # licence/pro/custom): kept for the classification, see _classify_updates.
+    "$@" "$kind" list --fields=name,update,update_version,update_package --format=csv \
+      2>/dev/null < /dev/null | tr -d '\r' > "$dir/${kind}s.packages.csv" || true
+    : > "$dir/${kind}s.attempts.tsv"
+    list="$(_update_plan "$kind" "$dir/${kind}s.before.csv" "$logf" "$@")"
+    [ -n "$list" ] || log_info "  All ${kind}s already up to date."
+    for x in $list; do
+      skip="$(_update_skip_reason "$kind" "$x")"
+      if [ -n "$skip" ]; then
+        log_info "  Skipping $x ($skip)"
+        _ulog_note "$logf" "$kind skip: $x ($skip)"
+        continue
+      fi
+      log_info "  Updating $kind: $x..."
+      out="$(mktemp)"; ec=0
+      _ulog "$logf" "$kind update $x" _run_to "$out" "$@" "$kind" update "$x" || ec=$?
+      # name, exit code, fatal?, first error line — the raw material for the classes.
+      printf '%s\t%s\t%s\t%s\n' "$x" "$ec" \
+        "$(grep -qiE 'PHP Fatal error|Fatal error:' "$out" && echo 1 || echo 0)" \
+        "$(grep -m1 -iE '^(Error|Warning|Fehler|PHP Fatal error)' "$out" | tr '\t' ' ' | cut -c1-200 || true)" \
+        >> "$dir/${kind}s.attempts.tsv"
+      rm -f "$out"
+      if [ "$ec" != 0 ]; then
+        rc=1; log_warn "  $kind update failed: $x"
+        _update_step_done
+        if ! _site_boots "$@"; then
+          _ulog_note "$logf" "STOP: site does not boot after '$kind update $x' — no further updates run"
+          log_error "The site does not boot after updating $x — stopping all further updates."
+          _WPSITE_UPDATES_BROKEN=1; return 2
+        fi
+        _ulog_note "$logf" "boot check after failed '$kind update $x': site still boots — continuing"
+        continue
+      fi
+      _update_step_done
+    done
   done
   return "$rc"
+}
+
+# Run a command, copying its combined output to <file> as well as stdout; keeps its status.
+# The status travels through a file, not PIPESTATUS: any DEBUG trap (bats has one) runs
+# between the pipeline and the `return` and clobbers PIPESTATUS — every update then
+# looked like exit 0.
+_run_to() { # file cmd...
+  local f="$1" rc; shift
+  { local r=0; "$@" || r=$?; echo "$r" > "$f.rc"; } 2>&1 | tee "$f"
+  rc="$(cat "$f.rc" 2>/dev/null || echo 1)"; rm -f "$f.rc"
+  return "$rc"
+}
+
+# --- Why didn't it update? (HARDENING-PLAN.md Phase 4) ---------------------------------
+# Every plugin/theme that had an update (or was attempted, or is held/manual) gets ONE
+# class, locale-independent — derived from versions, exit codes, the PHP fatal marker and
+# the update_package WordPress knew BEFORE the run, never from German/English wording:
+#   updated      version changed
+#   held         client hold list / global skip — not attempted, on purpose
+#   no-package   not updated and WordPress had NO download package (licence/pro/custom)
+#   refused      update call exit 0, version unchanged (the plugin's updater declined)
+#   fatal        PHP fatal in the update output — a real bug
+#   error        any other failure (download, filesystem, disk) — first error line kept
+#   not-attempted  had an update but was never tried (the run stopped early)
+#   manual       on the client's manual list (updates WP-CLI can't see) — reminder only
+# Written to <dir>/updates.outcome.tsv: kind, name, class, from, to, detail.
+
+# One column of the row whose (unquoted) first field is <name>, from a CSV with header.
+_csv_col() { # file name col
+  [ -f "$1" ] || return 0
+  awk -F, -v n="$2" -v c="$3" 'NR>1 { x=$1; gsub(/^"|"$/,"",x); if (x==n) { v=$c; gsub(/^"|"$/,"",v); print v; exit } }' "$1" 2>/dev/null || true
+}
+
+_classify_updates() { # dir client
+  local dir="$1" client="$2" out="$1/updates.outcome.tsv" kind name
+  : > "$out"
+  for kind in plugin theme; do
+    local b="$dir/${kind}s.before.csv" a="$dir/${kind}s.after.csv" pk="$dir/${kind}s.packages.csv" at="$dir/${kind}s.attempts.tsv"
+    local names
+    names="$( { _update_available_from_csv "$b"
+                awk -F, 'NR>1 && $2=="available" { x=$1; gsub(/^"|"$/,"",x); print x }' "$pk" 2>/dev/null
+                cut -f1 "$at" 2>/dev/null; } | awk 'NF && !seen[$0]++' || true)"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      local vb va to pkg skip row ec fatal err class detail=""
+      vb="$(_csv_col "$b" "$name" 2)"; va="$(_csv_col "$a" "$name" 2)"
+      to="$(_csv_col "$pk" "$name" 3)"; pkg="$(_csv_col "$pk" "$name" 4)"
+      row="$(awk -F'\t' -v n="$name" '$1==n' "$at" 2>/dev/null | tail -1 || true)"
+      skip="$(_WPSITE_RUN_CLIENT="$client" _update_skip_reason "$kind" "$name")"
+      if [ -n "$va" ] && [ "$va" != "$vb" ]; then class=updated; to="$va"
+      elif [ -n "$skip" ]; then class=held; detail="$skip"
+      elif [ -n "$row" ]; then
+        ec="$(printf '%s' "$row" | cut -f2)"; fatal="$(printf '%s' "$row" | cut -f3)"; err="$(printf '%s' "$row" | cut -f4)"
+        if [ "$fatal" = 1 ]; then class=fatal; detail="$err"
+        elif [ -z "$pkg" ]; then class=no-package; detail="${err:-WordPress had no download package}"
+        elif [ "$ec" = 0 ]; then class=refused; detail="the update call succeeded but the version did not change"
+        else class=error; detail="${err:-exit $ec}"
+        fi
+      else class=not-attempted; detail="had an update but was never tried (run stopped?)"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$kind" "$name" "$class" "$vb" "$to" "$detail" >> "$out"
+    done <<< "$names"
+  done
+  # Manual reminders (either kind; version from whichever before-snapshot has it).
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    local v; v="$(_csv_col "$dir/plugins.before.csv" "$name" 2)"; [ -n "$v" ] || v="$(_csv_col "$dir/themes.before.csv" "$name" 2)"
+    printf 'manual\t%s\tmanual\t%s\t\t%s\n' "$name" "$v" "$(wclient_map_get "$client" manual_updates "$name")" >> "$out"
+  done < <(wclient_map_keys "$client" manual_updates)
+  return 0
+}
+
+# Report lines for one kind from the outcome file (updated first, then everything else
+# grouped with what to do about it).
+_report_outcome() { # outcome.tsv kind client
+  local f="$1" kind="$2" client="$3"
+  awk -F'\t' -v k="$kind" '$1==k && $3=="updated" { printf "  • %s: %s → %s\n", $2, $4, $5; found=1 } END { exit !found }' "$f" || echo "  (none updated)"
+  awk -F'\t' -v k="$kind" -v c="$client" '
+    $1!=k || $3=="updated" { next }
+    $3=="held"          { printf "  ⊘ %s (%s) — %s%s\n", $2, $4, $6, ($5 != "" ? "; " $5 " available" : "") }
+    $3=="no-package"    { printf "  ! %s (%s → %s) — NO download package (licence/pro/custom?) — check it, then: wpsite hold %s %s\n", $2, $4, $5, c, $2 }
+    $3=="refused"       { printf "  ? %s (%s) — refused: %s\n", $2, $4, $6 }
+    $3=="error"         { printf "  ✗ %s (%s) — FAILED: %s\n", $2, $4, $6 }
+    $3=="fatal"         { printf "  ✗ %s (%s) — PHP FATAL during the update: %s\n", $2, $4, $6 }
+    $3=="not-attempted" { printf "  ⋯ %s (%s) — %s\n", $2, $4, $6 }' "$f"
+  return 0
+}
+
+# Manual reminders, rendered once (they're not tied to plugins vs themes).
+_report_manual() { # outcome.tsv
+  awk -F'\t' '$3=="manual" { if (!h) { print ""; print "Update by hand in wp-admin (WP-CLI cannot see these updates):"; h=1 }
+                             printf "  ✎ %s (currently %s)%s\n", $2, ($4 != "" ? $4 : "?"), ($6 != "" ? " — " $6 : "") }' "$1"
+  return 0
+}
+
+# The post-upgrade briefing: everything that didn't update, and what to do. With
+# interactive=1 on a TTY, offers to put no-package/refused items on the hold list (never
+# fatal/error — those are bugs to look at). Always prints the ready-made commands too.
+_update_briefing() { # dir client interactive
+  local dir="$1" client="$2" interactive="${3:-0}" f="$1/updates.outcome.tsv"
+  [ -s "$f" ] || return 0
+  local n; n="$(awk -F'\t' '$3!="updated" && $3!="manual"' "$f" | grep -c . || true)"
+  local m; m="$(awk -F'\t' '$3=="manual"' "$f" | grep -c . || true)"
+  [ "$n" -gt 0 ] || [ "$m" -gt 0 ] || { log_ok "Everything with an update was updated."; return 0; }
+  echo >&2
+  log_info "Briefing — not updated ($n):"
+  awk -F'\t' '$3!="updated" && $3!="manual" { printf "  %-12s %-34s %s%s\n", $3, $2 " (" $1 ")", $4, ($6 != "" ? "  — " $6 : "") }' "$f" >&2
+  [ "$m" -gt 0 ] && _report_manual "$f" >&2
+  local cands; cands="$(awk -F'\t' '$3=="no-package" || $3=="refused" { print $2 }' "$f")"
+  [ -n "$cands" ] || return 0
+  echo >&2
+  log_info "Pro/licensed/custom and shouldn't be auto-updated? Put it on the hold list:"
+  local c; for c in $cands; do log_info "  wpsite hold $client $c --reason \"…\""; done
+  if [ "$interactive" = 1 ] && [ -t 0 ] && [ -t 2 ]; then
+    local ans reason
+    for c in $cands; do
+      printf 'Hold %s for %s (never auto-update it)? [y/N] ' "$c" "$client" >&2
+      read -r ans < /dev/tty || ans=""
+      case "$ans" in y|Y|yes|j|J|ja) ;; *) continue ;; esac
+      printf '  Reason (Enter = "%s"): ' "$(awk -F'\t' -v n="$c" '$2==n {print $3; exit}' "$f")" >&2
+      read -r reason < /dev/tty || reason=""
+      [ -n "$reason" ] || reason="$(awk -F'\t' -v n="$c" '$2==n {print $3; exit}' "$f")"
+      cmd_hold "$client" "$c" --reason "$reason" || log_warn "  could not hold $c"
+    done
+  fi
+  return 0
+}
+
+# apply vs. the latest rehearsal — informational only, never a gate. Anything that behaved
+# differently on production than in the rehearsal, and production versions that moved
+# since the backup the rehearsal was built from.
+_compare_with_rehearsal() { # apply_dir client
+  local dir="$1" client="$2" rdir
+  rdir="$(_latest_upgrade_dir "$client" 2>/dev/null || true)"
+  [ -n "$rdir" ] && [ -d "$rdir" ] || return 0
+  local lines=""
+  if [ -s "$rdir/updates.outcome.tsv" ] && [ -s "$dir/updates.outcome.tsv" ]; then
+    lines="$(awk -F'\t' 'NR==FNR { r[$1 FS $2]=$3; next } ($1 FS $2) in r && r[$1 FS $2] != $3 {
+               printf "  %s %s: rehearsal %s, production %s\n", $1, $2, r[$1 FS $2], $3 }' \
+             "$rdir/updates.outcome.tsv" "$dir/updates.outcome.tsv" 2>/dev/null || true)"
+  fi
+  local k moved=""
+  for k in plugins themes; do
+    [ -f "$rdir/$k.before.csv" ] && [ -f "$dir/$k.before.csv" ] || continue
+    moved+="$(awk -F, 'NR==FNR { if (FNR>1) { x=$1; gsub(/^"|"$/,"",x); r[x]=$2 }; next }
+                FNR>1 { x=$1; gsub(/^"|"$/,"",x); if ((x in r) && r[x] != $2) printf "  %s: %s in the rehearsal, %s on production now\n", x, r[x], $2 }' \
+              "$rdir/$k.before.csv" "$dir/$k.before.csv" 2>/dev/null || true)"
+  done
+  [ -n "$lines$moved" ] || return 0
+  {
+    echo
+    echo "Compared with the rehearsal ($(basename "$rdir")):"
+    [ -n "$lines" ] && printf '%s\n' "$lines"
+    [ -n "$moved" ] && { echo "  Production changed since the rehearsal's backup:"; printf '%s\n' "$moved"; }
+  }
+  return 0
 }
 
 # After the run: what was updatable BEFORE but still sits at the same version (and
@@ -338,7 +549,7 @@ _report_missed_updates() { # dir
   for kind in plugin theme; do
     csv_b="$dir/${kind}s.before.csv"; csv_a="$dir/${kind}s.after.csv"
     for n in $(_update_available_from_csv "$csv_b"); do
-      [ "$kind" = plugin ] && [ -n "$(_plugin_update_skip_reason "$n")" ] && continue
+      [ -n "$(_update_skip_reason "$kind" "$n")" ] && continue
       vb="$(awk -F, -v n="$n" 'NR>1 { x=$1; gsub(/^"|"$/,"",x); if (x==n) { print $2; exit } }' "$csv_b" 2>/dev/null || true)"
       va="$(awk -F, -v n="$n" 'NR>1 { x=$1; gsub(/^"|"$/,"",x); if (x==n) { print $2; exit } }' "$csv_a" 2>/dev/null || true)"
       if [ -n "$va" ] && [ "$vb" = "$va" ]; then
@@ -516,6 +727,7 @@ cmd_upgrade() {
   # --- Upgrades (the version diff is the source of truth, so warn-don't-die) ---
   local is_ms=0
   [ "$(_upgrade_wp "$app_c" eval 'echo is_multisite() ? 1 : 0;' 2>/dev/null | tr -d '[:space:]')" = "1" ] && is_ms=1
+  _WPSITE_RUN_CLIENT="$client"          # its hold list applies
   _run_updates "$dir" "$is_ms" _upgrade_wp "$app_c" || true
 
   # --- AFTER ---
@@ -523,6 +735,7 @@ cmd_upgrade() {
   _upgrade_wp "$app_c" plugin list --fields="$WPSITE_PLUGIN_FIELDS" --format=csv 2>/dev/null | tr -d '\r' > "$dir/plugins.after.csv"
   _upgrade_wp "$app_c" theme  list --fields=name,version,update --format=csv 2>/dev/null | tr -d '\r' > "$dir/themes.after.csv"
   _report_missed_updates "$dir"
+  _classify_updates "$dir" "$client"
 
   # --- Reconcile plugins that fell inactive during the update ---
   # This is the rehearsal, so this is where you WANT to find out: a plugin that
@@ -540,6 +753,9 @@ cmd_upgrade() {
 
   # German client report and PDF compilation
   _write_client_report_de "$client" "$stamp" "$core_before" "$core_after" "$dir"
+
+  # What didn't update, and what to do about it (offers the hold list on a terminal).
+  _update_briefing "$dir" "$client" 1
 
   # --- Review: AFTER screenshots, smoke check, build + open comparison page ---
   if [ "$review" = 1 ]; then

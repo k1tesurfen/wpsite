@@ -145,17 +145,22 @@ It asks a few questions. Here's exactly what to do for each:
    01_Projekte** and find the **`LIVE_WEB`** folder. **Drag that folder into the Terminal
    window**, then press **Return**.
 
-4. **Creating your SSH key** (only the first time): it makes a secure "key" so you can reach
-   the client servers. When it asks for a **passphrase**, the simplest choice is to press
-   **Return twice** (no passphrase). Then it continues.
+When it finishes it tells you whether both shared registries are reachable (mandos for
+access, wpsite's own for the WordPress settings).
 
-5. **Connecting to each client** → For every client it may ask:
+4. **Your SSH access to the client servers** is mandos's job (wpsite never installs keys).
+   For each client you'll work on, run:
+
+   ```bash
+   mandos client setup-key <client>
+   ```
+
+   - The first time it creates your key: when it asks for a **passphrase**, press
+     **Return twice** (no passphrase).
    - *"Are you sure you want to continue connecting?"* → type **`yes`** and press Return.
-   - A **password for that server** → enter it if you have it (ask Beren if unsure). If you
-     don't have a particular server's password, that client is skipped — the rest still work,
-     and you can finish it later with `wpsite setup --keys-only`.
+   - A **password for that server** → enter it if you have it (ask Beren if unsure).
 
-When it finishes it lists which clients are ready. 🎉
+Then you're set up. 🎉
 
 Check everything:
 

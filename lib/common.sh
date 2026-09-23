@@ -163,13 +163,14 @@ config_require() {
   [ -f "$WPSITE_CONFIG" ] || die "Config not found at $WPSITE_CONFIG (see wpsite.yml.example)"
 }
 
-# Preconditions for commands that READ OR WRITE CLIENT IDENTITY — anything reaching
-# production or the shared registry (backup, build, apply, redirect, prune, client,
-# test, upgrade, review). These are gateway-only by design; mandos owns the registry,
-# so its absence is a hard error here rather than a silent empty result.
+# Preconditions for commands that work on CLIENTS (backup, build, apply, redirect, prune,
+# test, upgrade, review, hold, …): wpsite's own client registry must be READABLE. An
+# unreadable registry (Drive unmounted) must never look like "no clients / nothing held".
+# Deliberately does NOT require mandos: only commands that reach production need access,
+# and they call require_access for the specific client.
 config_require_registry() {
   config_require
-  require "$MANDOS_BIN"
+  wteam_require
 }
 
 # Expand a leading ~/ to $HOME (avoids eval on config values).
@@ -186,21 +187,23 @@ expand_tilde() {
 _yq() { yq -r "$1 // \"\"" "$WPSITE_CONFIG"; }
 
 # ---------------------------------------------------------------------------
-# Client registry — OWNED BY MANDOS.
-# wpsite no longer reads or writes the shared client YAML directly; it shells out to
-# the `mandos` CLI, which resolves the two-layer local/team config (the team file on
-# Google Drive is the source of truth), preserves comments on edits, and refuses
-# writes when Drive is unmounted. These helpers keep their original names/signatures
-# so the many callers across lib/ don't change.
+# TWO REGISTRIES, deliberately NOT linked (see HARDENING-PLAN.md Phase 1):
+#   mandos — the KEYHOLDER. Access only: ssh, wp_root, cloud_folder (the Drive project
+#            folder). Read via client_get / written via client_set. Knows nothing about
+#            WordPress, and must stay usable without it.
+#   wpsite — its OWN shared file on the Drive (wpsite.team.yml), keyed by client ID:
+#            everything WordPress/maintenance-specific (hold lists, deactivate lists,
+#            review pages, remote_tmp, local_host, login_path, …). Read via wclient_*.
+# A client is "in wpsite" only once registered here; only `wpsite backup <c>` registers
+# an ID that mandos knows (see _backup_register). Deleting a client in mandos never
+# touches wpsite — the client then simply has no production access.
 # ---------------------------------------------------------------------------
 
-# Resolved path of the shared client registry (mandos's team file), or empty when
-# mandos runs solo. Kept for doctor/setup/client status messages. (Legacy name.)
+# Resolved path of mandos's team file, or empty when mandos runs solo / is absent.
 _team_config_path() { _mandos config get team-config 2>/dev/null || true; }
 
-# Reachability probe for the client registry: prints the registry file path and
-# returns 0 when reachable, non-zero when a team file is configured but missing
-# (Drive unmounted). Used to skip optional team-config writes. (Legacy name, now a shim.)
+# Reachability probe for mandos's registry file (for mandos WRITES only, e.g. the
+# cloud_folder auto-remap): prints its path, non-zero when configured but missing.
 _client_file() {
   local t; t="$(_team_config_path)"
   [ -n "$t" ] || { printf '%s' "$WPSITE_CONFIG"; return 0; }   # mandos solo → local file
@@ -218,25 +221,130 @@ config_base_dir() {
 # configuration, see DEVBOX-PLAN.md — return non-zero silently rather than letting the
 # shell print "…: No such file or directory" on stderr for every registry read. Note
 # this is NOT the Drive-unmounted case: there mandos exists and explains itself on
-# stderr, which callers still want to see. Commands that genuinely need the registry
-# gate on config_require_registry, which fails with a real message instead.
+# stderr, which callers still want to see. Commands that need production access gate
+# on require_access, which fails with a real message instead.
 _mandos() { have "$MANDOS_BIN" || return 127; "$MANDOS_BIN" "$@"; }
 
-# Client registry helpers — thin adapters over `mandos client …`. The read helpers end
-# with `|| true` so a `set -e` script never aborts when the registry is unreachable
-# (mandos already explains why on stderr); they degrade to empty output instead.
-config_clients()       { _mandos client list || true; }
-config_has_client()    { _mandos client has "$1"; }
-client_get()           { _mandos client get "$1" "$2" 2>/dev/null || true; }
-client_set()           { _mandos client set "$1" "$2" "$3"; }
-config_remove_client() { _mandos client remove "$1" >/dev/null 2>&1 || true; }
-client_unset()         { _mandos client unset "$1" "$2"; }
+# --- mandos: ACCESS fields only (ssh, wp_root, cloud_folder) -----------------------
+# Reads end with `|| true` so a `set -e` script degrades to empty when mandos or the
+# Drive is unreachable (mandos explains why on stderr).
+client_get()      { _mandos client get "$1" "$2" 2>/dev/null || true; }
+client_set()      { _mandos client set "$1" "$2" "$3"; }
+client_unset()    { _mandos client unset "$1" "$2"; }
+access_clients()  { _mandos client list 2>/dev/null || true; }
+access_has()      { _mandos client has "$1" >/dev/null 2>&1; }
 
+# Production access for <client>: mandos must know it. Used by every command that
+# reaches the server (backup, apply, test, redirect).
+require_access() { # client
+  local c="$1"
+  [ -n "$c" ] || die "No client specified."
+  have "$MANDOS_BIN" || die "mandos is not installed — production access needs it (see: wpsite doctor)."
+  access_has "$c" || die "No production access for '$c' in mandos (add it with: mandos client add $c)."
+}
+
+# --- wpsite's own registry file -----------------------------------------------------
+# Location, in order: WPSITE_TEAM_CONFIG → `team_config:` in the local wpsite.yml →
+# DERIVED from mandos's team file (…/01_Global/mandos/mandos.team.yml →
+# …/01_Global/wpsite/wpsite.team.yml), so a gateway already set up for mandos needs no
+# extra configuration. Empty when none of them resolves (e.g. a dev box).
+wpsite_team_file() {
+  if [ -n "${WPSITE_TEAM_CONFIG:-}" ]; then printf '%s' "$WPSITE_TEAM_CONFIG"; return 0; fi
+  local p=""
+  [ -f "$WPSITE_CONFIG" ] && p="$(_yq '.team_config' 2>/dev/null || true)"
+  if [ -n "$p" ]; then expand_tilde "$p"; return 0; fi
+  local m; m="$(_team_config_path)"
+  [ -n "$m" ] || return 0
+  printf '%s/wpsite/wpsite.team.yml' "$(dirname "$(dirname "$m")")"
+}
+
+# True when the registry file exists and is readable.
+wteam_readable() { local f; f="$(wpsite_team_file)"; [ -n "$f" ] && [ -r "$f" ]; }
+
+# Hard gate: the registry must be readable. Never degrade to "empty" here — for upgrade
+# and apply an empty hold list would mean updating plugins someone deliberately held.
+wteam_require() {
+  local f; f="$(wpsite_team_file)"
+  [ -n "$f" ] || die "wpsite's client registry is not configured (set team_config: in $WPSITE_CONFIG, or configure mandos so it can be derived)."
+  [ -r "$f" ] && return 0
+  if [ -d "$(dirname "$f")" ]; then
+    die "wpsite's client registry $f does not exist yet (first time? run: wpsite migrate-registry)."
+  fi
+  die "wpsite's client registry is not reachable: $f (is Google Drive mounted?)"
+}
+
+# Read one yq expression from the registry; empty output when unreadable/missing key.
+# Values are passed in via strenv() — never interpolated into the expression.
+_wq() { # expr
+  local f; f="$(wpsite_team_file)"
+  [ -n "$f" ] && [ -r "$f" ] || return 0
+  yq -r "$1" "$f" 2>/dev/null || true
+}
+
+# Write via `yq -i` (comments survive). Refuses when the Drive/parent dir is missing;
+# creates the file with a header on first write into an existing folder.
+_wq_write() { # expr
+  local f; f="$(wpsite_team_file)"
+  [ -n "$f" ] || die "wpsite's client registry is not configured."
+  if [ ! -f "$f" ]; then
+    [ -d "$(dirname "$f")" ] || die "Cannot write wpsite's client registry: $(dirname "$f") is missing (is Google Drive mounted?)"
+    printf '%s\n' "# wpsite client registry — WordPress/maintenance settings per client, keyed by" \
+      "# client ID. Access (ssh, wp_root, Drive project folder) lives in mandos, NOT here." \
+      "# Edited by wpsite (yq -i keeps comments); hand edits are fine." "clients: {}" > "$f"
+  fi
+  yq -i "$1" "$f"
+}
+
+wclient_list() { _wq '(.clients // {}) | keys | .[]'; }
+wclient_has()  { # client
+  local f; f="$(wpsite_team_file)"
+  [ -n "$f" ] && [ -r "$f" ] || return 1
+  C="$1" yq -e '.clients | has(strenv(C))' "$f" >/dev/null 2>&1
+}
+# A scalar, or a list printed one item per line. Empty when unset.
+wclient_get() { # client key
+  C="$1" K="$2" _wq '.clients[strenv(C)][strenv(K)] | select(. != null) | ((select(tag == "!!seq") | .[]), select(tag != "!!seq"))'
+}
+wclient_set()   { C="$1" K="$2" V="$3" _wq_write '.clients[strenv(C)][strenv(K)] = strenv(V)'; }
+wclient_unset() { C="$1" K="$2" _wq_write 'del(.clients[strenv(C)][strenv(K)])'; }
+wclient_register() { # client
+  C="$1" D="$(date +%Y-%m-%d)" _wq_write '.clients[strenv(C)].registered = (.clients[strenv(C)].registered // strenv(D))'
+}
+wclient_forget() { C="$1" _wq_write 'del(.clients[strenv(C)])'; }
+
+# Maps under a client (hold_plugins / manual_updates): name → reason.
+wclient_map_keys() { C="$1" M="$2" _wq '(.clients[strenv(C)][strenv(M)] // {}) | keys | .[]'; }
+wclient_map_get()  { C="$1" M="$2" K="$3" _wq '.clients[strenv(C)][strenv(M)][strenv(K)] // ""'; }
+wclient_map_has()  { # client map key
+  local f; f="$(wpsite_team_file)"; [ -n "$f" ] && [ -r "$f" ] || return 1
+  C="$1" M="$2" K="$3" yq -e '(.clients[strenv(C)][strenv(M)] // {}) | has(strenv(K))' "$f" >/dev/null 2>&1
+}
+wclient_map_set()  { C="$1" M="$2" K="$3" V="$4" _wq_write '.clients[strenv(C)][strenv(M)][strenv(K)] = strenv(V)'; }
+wclient_map_del()  { C="$1" M="$2" K="$3" _wq_write 'del(.clients[strenv(C)][strenv(M)][strenv(K)])'; }
+
+# Global settings (settings.<key>), e.g. test_mail_to.
+wsetting_get() { K="$1" _wq '.settings[strenv(K)] // ""'; }
+
+# The client list/has helpers the rest of wpsite uses = the WPSITE registry.
+config_clients()    { wclient_list; }
+config_has_client() { wclient_has "$1"; }
+
+# A client wpsite works on: registered in wpsite's registry. (Production access is a
+# separate check — require_access.)
 require_client() { # client_name
   local c="$1"
   [ -n "$c" ] || die "No client specified."
-  have "$MANDOS_BIN" || die "mandos is not installed — client commands need the registry (see: wpsite doctor)."
-  _mandos client has "$c" || die "Client '$c' not found (see: mandos client list)."
+  wclient_has "$c" && return 0
+  if access_has "$c"; then
+    die "'$c' is not in wpsite yet — register it with its first backup: wpsite backup $c"
+  fi
+  die "Client '$c' not found (neither in wpsite nor in mandos)."
+}
+
+# A name the creators (new/clone) must refuse: a wpsite client, a dev site, or an ID
+# mandos knows (it may be registered in wpsite later).
+_name_taken() { # name
+  [ -n "$(target_kind "$1")" ] || access_has "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,7 +470,7 @@ WPSITE_CLOUD_BACKUP_SUBDIR="100_Backup"
 # domain folder itself is NEVER created — cloud_available() requires it to pre-exist,
 # so only the 100_Backup subfolder is ever written.
 client_cloud_dir() { # client
-  local override; override="$(client_get "$1" cloud_dir)"
+  local override; override="$(wclient_get "$1" cloud_dir)"
   if [ -n "$override" ]; then expand_tilde "$override"; return 0; fi
   local base folder
   base="$(config_cloud_base)"
@@ -531,7 +639,7 @@ _local_host_from_url() {
 # Local hostname for a replica, e.g. acme.test. Overridable via clients.<c>.local_host.
 client_local_host() {
   local client="$1"
-  local override; override="$(client_get "$client" local_host)"
+  local override; override="$(wclient_get "$client" local_host)"
   [ -n "$override" ] && { printf '%s' "$override"; return; }
 
   # Dynamically extract from the newest backup's meta.env if it exists

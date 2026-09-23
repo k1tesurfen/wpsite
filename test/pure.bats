@@ -229,3 +229,41 @@ setup() {
   run _resolve_wp_image 7.0.5 ""
   [ "$output" = "wordpress:7.0-apache" ]
 }
+
+# --- Rehearsal fidelity (HARDENING-PLAN.md Phase 7) ----------------------------------
+# arbeitsplatz-erde: the replica carried akismet/hello/twentytwenty* that production
+# doesn't have (copied in by the image's entrypoint) — only what APPEARED is removed.
+
+@test "_strip_image_extras: removes only what appeared after the snapshot" {
+  source "$REPO/lib/cmd_build.sh"
+  local d="$BATS_TEST_TMPDIR/wpc"
+  mkdir -p "$d/plugins/acf" "$d/themes/greyd_suite"
+  _content_snapshot "$d" > "$BATS_TEST_TMPDIR/snap"
+  mkdir -p "$d/plugins/akismet" "$d/themes/twentytwentyfour"; : > "$d/plugins/hello.php"
+  run _strip_image_extras "$d" "$BATS_TEST_TMPDIR/snap"
+  [ "$status" -eq 0 ]
+  [ -d "$d/plugins/acf" ]; [ -d "$d/themes/greyd_suite" ]
+  [ ! -e "$d/plugins/akismet" ]; [ ! -e "$d/plugins/hello.php" ]; [ ! -e "$d/themes/twentytwentyfour" ]
+}
+
+@test "_strip_image_extras: a production akismet (in the backup) is kept" {
+  source "$REPO/lib/cmd_build.sh"
+  local d="$BATS_TEST_TMPDIR/wpc2"; mkdir -p "$d/plugins/akismet"
+  _content_snapshot "$d" > "$BATS_TEST_TMPDIR/snap2"
+  _strip_image_extras "$d" "$BATS_TEST_TMPDIR/snap2"
+  [ -d "$d/plugins/akismet" ]
+}
+
+@test "_pin_core_version: downloads the exact version only when it differs; offline warns" {
+  source "$REPO/lib/cmd_build.sh"
+  CORE=7.0; DL_OK=1; LOG="$BATS_TEST_TMPDIR/dl"; : > "$LOG"
+  docker() { case "$*" in *"core version"*) echo "$CORE" ;; *"core download"*) echo "$*" >> "$LOG"; [ "$DL_OK" = 1 ] ;; esac; }
+  run _pin_core_version app 7.0.6
+  grep -q -- '--version=7.0.6 --force --skip-content' "$LOG"
+  : > "$LOG"; CORE=7.0.6
+  run _pin_core_version app 7.0.6
+  [ ! -s "$LOG" ]
+  CORE=7.0; DL_OK=0
+  run _pin_core_version app 7.0.6
+  [ "$status" -eq 0 ]; [[ "$output" == *"keeps core 7.0"* ]]
+}

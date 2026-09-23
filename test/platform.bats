@@ -204,9 +204,9 @@ dns_run() {
   [[ "$output" != *"not found"* ]]
 }
 
-@test "require_client explains a missing mandos instead of a confusing exec error" {
+@test "require_access explains a missing mandos instead of a confusing exec error" {
   run env REPO="$REPO" MANDOS_BIN="$BATS_TEST_TMPDIR/absent" /bin/bash -c '
-    source "$REPO/lib/common.sh"; require_client acme' 2>&1
+    source "$REPO/lib/common.sh"; require_access acme' 2>&1
   [ "$status" -ne 0 ]
   [[ "$output" == *"mandos is not installed"* ]]
 }
@@ -217,7 +217,7 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
 ' > "$BIN/mandos"
   chmod +x "$BIN/mandos"
   run env REPO="$REPO" MANDOS_BIN="$BIN/mandos" /bin/bash -c 'set -uo pipefail
-    source "$REPO/lib/common.sh"; config_clients; config_has_client acme && echo HAS'
+    source "$REPO/lib/common.sh"; access_clients; access_has acme && echo HAS'
   [ "$status" -eq 0 ]
   [[ "$output" == *acme* ]]; [[ "$output" == *HAS* ]]
 }
@@ -284,7 +284,7 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
   local c
   local cfg="$BATS_TEST_TMPDIR/dispatch.yml"
   printf 'base_dir: %s/root\n' "$BATS_TEST_TMPDIR" > "$cfg"
-  for c in apply redirect backup client push test prune; do
+  for c in apply redirect backup push test prune forget hold manual migrate-registry; do
     run env WPSITE_ROLE=dev WPSITE_CONFIG="$cfg" "$REPO/bin/wpsite" "$c" somearg
     [ "$status" -ne 0 ]
     [[ "$output" == *"gateway command"* ]] || { echo "not guarded: $c -- $output"; return 1; }
@@ -320,7 +320,7 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
 @test "push: no dev box configured -> explains how to configure one" {
   local cfg="$BATS_TEST_TMPDIR/push.yml"
   printf 'base_dir: %s/root\nclients:\n  acme:\n    ssh: u@h\n    wp_root: /v\n' "$BATS_TEST_TMPDIR" > "$cfg"
-  run env WPSITE_CONFIG="$cfg" MANDOS_BIN="$REPO/test/fixtures/mandos-stub" \
+  run env WPSITE_CONFIG="$cfg" WPSITE_TEAM_CONFIG="$cfg" MANDOS_BIN="$REPO/test/fixtures/mandos-stub" \
       MANDOS_STUB_CONFIG="$cfg" "$REPO/bin/wpsite" push acme
   [ "$status" -ne 0 ]
   [[ "$output" == *"No dev box configured"* ]]
@@ -330,7 +330,7 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
 @test "push: invalid dev-site name is rejected before anything is transferred" {
   local cfg="$BATS_TEST_TMPDIR/push2.yml"
   printf 'base_dir: %s/root\ndevbox:\n  host: nowhere\nclients:\n  acme:\n    ssh: u@h\n    wp_root: /v\n' "$BATS_TEST_TMPDIR" > "$cfg"
-  run env WPSITE_CONFIG="$cfg" MANDOS_BIN="$REPO/test/fixtures/mandos-stub" \
+  run env WPSITE_CONFIG="$cfg" WPSITE_TEAM_CONFIG="$cfg" MANDOS_BIN="$REPO/test/fixtures/mandos-stub" \
       MANDOS_STUB_CONFIG="$cfg" "$REPO/bin/wpsite" push acme "Bad_Name"
   [ "$status" -ne 0 ]
   [[ "$output" == *"Invalid dev site name"* ]]

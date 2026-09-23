@@ -132,17 +132,31 @@ fn check_prerequisites() -> Vec<Prerequisite> {
 
 #[tauri::command]
 fn get_clients() -> Result<Vec<String>, String> {
-    // Ask the CLI for the client names — it is the source of truth and knows about
-    // the shared TEAM config in Google Drive (the client list no longer lives in the
-    // local config file). `wpsite list --names` prints one name per line to stdout and
+    // Ask the CLI for the client names — it is the source of truth (wpsite's own registry
+    // on Google Drive). `wpsite list --names` prints one name per line to stdout and
     // degrades to empty (with a stderr warning) when Drive is unmounted.
     let output = Command::new("/usr/local/bin/wpsite")
         .arg("list")
         .arg("--names")
         .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin")
         .output();
+    let mut names = parse_name_lines(output)?;
 
-    parse_name_lines(output)
+    // Plus the clients mandos has access to that aren't in wpsite yet (the registries are
+    // not linked; a client joins wpsite with its first backup). Listing them lets the user
+    // start that first backup from here. Best-effort: a failure just shows fewer clients.
+    let unregistered = Command::new("/usr/local/bin/wpsite")
+        .args(["list", "--unregistered"])
+        .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin")
+        .output();
+    if let Ok(extra) = parse_name_lines(unregistered) {
+        for n in extra {
+            if !names.contains(&n) {
+                names.push(n);
+            }
+        }
+    }
+    Ok(names)
 }
 
 #[tauri::command]
@@ -227,12 +241,13 @@ struct SiteStatus {
 
 // Resolve a site's admin URL = <base>/<login_path>. Most sites use the default
 // `/wp-admin/`, but some clients change the login path (WPS Hide Login, Wordfence, …);
-// that's recorded as an optional `login_path` field on the client in the mandos registry.
-// Dev sites (and any lookup failure) fall back to `/wp-admin/`.
+// that's recorded as an optional `login_path` in wpsite's OWN client registry (read via
+// `wpsite show <c> login_path` — mandos holds access data only). Dev sites (and any
+// lookup failure) fall back to `/wp-admin/`.
 fn resolve_admin_url(name: &str, base_url: &str) -> String {
     let mut path = String::new();
-    if let Ok(out) = Command::new("/usr/local/bin/mandos")
-        .args(["client", "get", name, "login_path"])
+    if let Ok(out) = Command::new("/usr/local/bin/wpsite")
+        .args(["show", name, "login_path"])
         .env("PATH", "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin")
         .output()
     {

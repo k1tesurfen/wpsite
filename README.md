@@ -39,13 +39,17 @@ Client identity/SSH access and the Drive `cloud_base` root now live in **mandos*
 ## Usage
 
 ```bash
-# Manage clients (SSH-backed production sites) — mandos owns the shared client registry:
-mandos client add <name> --ssh <u@h> --wp-root <p>   # onboard a client + install your SSH key
-mandos client list        # list client names   (get/set/unset/remove/setup-key/has too)
+# Access (SSH target, WordPress path, keys) — mandos is the keyholder:
+mandos client add <name> --ssh <u@h> --wp-root <p>   # onboard access + install your SSH key
+mandos client list        # who we have access to   (get/set/unset/remove/setup-key/has too)
 mandos client setup-key <c>   # (re)install your personal SSH key on a client's server
-# wpsite client add/edit/remove still work as thin wrappers that write through mandos:
-wpsite client edit <c>    # change a client's fields (interactive, or --ssh/--wp-root/--cloud-dir/…)
-wpsite client remove <c>  # remove a client + its replica (--purge also deletes its local backups)
+# wpsite keeps its OWN registry (WordPress settings per client). A client joins wpsite
+# with its first backup:
+wpsite backup  <c>        # first run for an ID mandos knows → registers it in wpsite
+wpsite show    <c>        # everything wpsite knows about a client (+ its mandos access)
+wpsite hold    <c> <plugin> [--reason "…"]   # never auto-update this plugin (upgrade + apply)
+wpsite manual  <c> <item>                    # reminder: update this by hand in wp-admin
+wpsite forget  <c>        # drop the client from wpsite (--purge: local backups too)
 
 # Backup & build replicas
 wpsite backup  <client>   # snapshot a remote site → local backup artifacts (media → placeholders)
@@ -84,9 +88,10 @@ wpsite status             # running replicas and their URLs
 wpsite doctor             # verify dependencies and environment
 ```
 
-Typical loop: `client add` to onboard, `backup` once, then `build` to (re)create the
-replica from it; `stop`/`start` to pause and resume without rebuilding; `destroy` to
-remove the replica (or `client remove` to drop the client entirely).
+Typical loop: `mandos client add` for access, `backup` once (registers the client in
+wpsite), then `build` to (re)create the replica from it; `stop`/`start` to pause and
+resume without rebuilding; `destroy` to remove the replica (or `forget` to drop the
+client from wpsite entirely — mandos access is untouched).
 
 ## Configuration
 
@@ -100,24 +105,35 @@ base_dir: ~/websites
 # dev: sites are managed by `wpsite new`/`clone`
 ```
 
-**mandos** — `~/.config/mandos/mandos.yml` owns the shared **client registry**
-(the `clients:` map, a YAML on mounted Google Drive), SSH key onboarding, and the
-Drive `cloud_base` root. Point wpsite at nothing here — it shells out to mandos.
-Set it up once with `mandos config init --team-config <shared-clients-yaml> --cloud-base <Drive-root>`.
+**Two shared registries on Google Drive, deliberately not linked:**
 
-Add a client with `mandos client add <name> --ssh <u@h> --wp-root <p>` — it writes the
-shared registry entry and installs your SSH key (generating one if you have none).
-`mandos client setup-key <c>` re-installs your key later; `mandos client set/unset/remove`
-edit entries. `wpsite client add/edit/remove` remain as thin wrappers that write through
-mandos. A client entry looks like:
+- **mandos** (`~/.config/mandos/mandos.yml` → its team file) is the **keyholder**: per
+  client only `ssh`, `wp_root` and the Drive project folder, plus SSH-key onboarding and
+  the Drive `cloud_base` root. Set it up once with
+  `mandos config init --team-config <mandos.team.yml> --cloud-base <Drive-root>`.
+- **wpsite** keeps its **own** registry for everything WordPress: hold lists, manual-update
+  reminders, deactivate lists, review pages, login path, backup temp dir, … By default it
+  sits next to mandos's file (`…/01_Global/mandos/mandos.team.yml` →
+  `…/01_Global/wpsite/wpsite.team.yml`); override with `team_config:` in the local config
+  or `WPSITE_TEAM_CONFIG`.
 
 ```yaml
+# wpsite.team.yml
+settings:
+  test_mail_to: admin@example.com
 clients:
   acme:
-    ssh: ubuntu@acme-industrial.com
-    wp_root: /var/www/acme.com
-    # local_host: acme.test   # optional override (default <client>.test)
+    registered: 2026-09-23
+    hold_plugins:
+      advanced-custom-fields-pro: "Pro, licence with the customer (2026-09-23)"
+    manual_updates:
+      greyd_suite: "updates only visible in wp-admin (2026-09-23)"
+    # local_host: acme.test   # optional override (default derived from the live domain)
 ```
+
+Deleting a client in mandos never touches wpsite (it simply loses production access);
+`wpsite forget` never touches mandos. First machine of the team after upgrading from the
+old layout: `wpsite migrate-registry` (dry run) → `wpsite migrate-registry --apply`.
 
 Client backups and the Docker working tree live under `<base_dir>/clients/<client>/`;
 local-only dev sites live under `<base_dir>/dev/<name>/`.

@@ -37,11 +37,11 @@ wpsite $VERSION — WordPress backup & local replica tool
 Usage: wpsite <command> [args]
 
 Commands:
-  setup               Onboard this machine: write the local config (base_dir,
-                      cloud_base, team_config) + install your SSH key on every
-                      client in the shared team config. Run once per machine.
-          --keys-only     …skip config; just (re)install keys for team clients
-  backup  <client>    Snapshot a remote site (real media by default)
+  setup               Onboard this machine: write base_dir to the local config and
+                      check that both registries (mandos access + wpsite's own) are
+                      reachable. SSH keys are mandos's job: mandos client setup-key
+  backup  <client>    Snapshot a remote site (real media by default). The first
+                      backup of a client mandos knows registers it in wpsite.
           --all       …back up every configured client, in sequence
           --light     …use blank placeholder media instead of real files (smaller)
           --persist   …mark the new backup permanent (exempt from rolling prune)
@@ -50,10 +50,16 @@ Commands:
   backup persist <client> <id> [--off]   Promote/demote an existing backup to permanent
   build   <client>    (Re)build & run a backup as a local replica (newest by default)
           --backup <id>   …use a specific backup (see: wpsite list <client>)
-  client  add [name]  Onboard a new SSH-backed client (wizard): install your SSH key
-                      (ssh-copy-id), write the config entry, then run 'test'
-          edit <name>    …change a client's fields (interactive or via --ssh/--wp-root/…)
-          remove <name>  …remove a client (+replica); --purge also deletes its backups
+  hold    <client> [<slug>]     Never auto-update this plugin/theme for <client> (upgrade
+                      AND apply skip it). No slug → list. --reason "…"  --remove
+  manual  <client> [<item>]     Items WP-CLI can't update (e.g. greyd_suite): upgrade/
+                      apply remind you to update them in wp-admin. --reason --remove
+  show    <client> [<key>]      Everything wpsite knows about a client (access from
+                      mandos + wpsite's own settings); with <key>: just that value
+  forget  <client>    Drop a client from wpsite (entry + replica); --purge also deletes
+                      its local backups. mandos access and cloud backups are untouched.
+  migrate-registry    One-off: move WordPress settings out of mandos into wpsite's own
+          --apply         registry (dry run without --apply)
   new     [name]      Create a fresh blank dev site (no name → wizard)
           --wp <ver> --php <ver> --host <h>   …pin versions / host (default latest/8.2)
   clone   <name> <devname>   Create a dev site from an ON-DISK backup (newest by
@@ -76,8 +82,10 @@ Commands:
   upgrade <client>    Update core/plugins/themes on the replica + write a report (with visual review)
           --noreview      …skip taking screenshots & opening comparison page
   review  <client>    Re-open the latest upgrade comparison page in the browser
-  apply   <client>    Run the rehearsed upgrade ON PRODUCTION (fresh backup first,
-                      typed confirmation; irreversible — rehearse first)
+  apply   <client>    Run the rehearsed upgrade ON PRODUCTION: preflight → typed
+                      confirmation → fresh backup → maintenance → updates → final check
+                      (live pages + test mail) on EVERY exit. Irreversible — rehearse first.
+          --check         …run only the preflight (read-only; e.g. before a round)
   report  <client> [<id>]   Regenerate a maintenance report's PDF from its .txt
                       (edit the .txt first; newest apply by default)
           --upgrade <id> --list --no-open
@@ -133,7 +141,7 @@ main() {
   # command on the wrong machine at 11pm — NOT a security control: the real boundary is
   # that a dev box holds no production credential at all. See DEVBOX-PLAN.md §5.10.
   case "$cmd" in
-    apply|redirect|backup|client|push|test|prune)
+    apply|redirect|backup|push|test|prune|forget|hold|manual|migrate-registry)
       if [ "$(config_role 2>/dev/null || true)" = "dev" ]; then
         die "'$cmd' is a gateway command, and this machine is configured as role=dev.
   Run it on the gateway — the machine holding the production SSH keys and Drive.
@@ -145,7 +153,11 @@ main() {
     setup)   cmd_setup "$@" ;;
     backup)  cmd_backup "$@" ;;
     build)   cmd_build "$@" ;;
-    client)  cmd_client "$@" ;;
+    hold)    cmd_hold "$@" ;;
+    manual)  cmd_manual "$@" ;;
+    show)    cmd_show "$@" ;;
+    forget)  cmd_forget "$@" ;;
+    migrate-registry) cmd_migrate_registry "$@" ;;
     new)     cmd_new "$@" ;;
     clone)   cmd_clone "$@" ;;
     push)    cmd_push "$@" ;;
@@ -168,6 +180,9 @@ main() {
     doctor)  cmd_doctor "$@" ;;
     test)    cmd_test "$@" ;;
     # Renamed verbs — hint instead of a bare "unknown command".
+    client) die "'wpsite client' is gone — the registries are split.
+  Access (ssh, wp_root, keys):  mandos client add|set|remove|setup-key
+  wpsite's own data:            wpsite show|hold|manual <client>, wpsite forget <client>" ;;
     up)   die "'up' was renamed. Use 'wpsite build $*' (rebuild) or 'wpsite start $*' (resume)." ;;
     down) die "'down' was renamed. Use 'wpsite stop $*' (pause) or 'wpsite destroy $*' (remove)." ;;
     *) log_error "Unknown command: $cmd"; usage; exit 1 ;;

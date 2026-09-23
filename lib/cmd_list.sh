@@ -2,15 +2,25 @@
 # wpsite list [client] — without a client, list all clients + backup counts;
 # with a client, list that client's individual backups (newest first).
 # wpsite list --names — machine-readable: client names only, one per line, to
-# stdout (team-aware, via config_clients). Used by the GUI / scripting.
+# stdout (wpsite's own client registry, via config_clients). Used by the GUI / scripting.
+# wpsite list --unregistered — porcelain: IDs mandos has access to that are NOT in wpsite
+# yet (their first `wpsite backup` registers them). The GUI lists these too, so a client
+# added with `mandos client add` can get its first backup from the GUI.
 
 cmd_list() {
   config_require
-  # Porcelain: just the client names (stdout, one per line). Team-aware — resolves
-  # the shared team config, and degrades to empty (with a stderr warning) if Drive
-  # is unmounted, so a caller never crashes.
+  # Porcelain: just the client names (stdout, one per line) from wpsite's registry.
+  # Degrades to empty if Drive is unmounted, so a caller never crashes.
   if [ "${1:-}" = "--names" ]; then
     config_clients
+    return 0
+  fi
+  if [ "${1:-}" = "--unregistered" ]; then
+    local reg; reg="$(config_clients)"
+    access_clients | while IFS= read -r c; do
+      [ -n "$c" ] || continue
+      printf '%s\n' "$reg" | grep -qxF "$c" || printf '%s\n' "$c"
+    done
     return 0
   fi
   # Porcelain: just the dev-site names (stdout, one per line). Dev sites are LOCAL
@@ -24,7 +34,7 @@ cmd_list() {
   if [ "${1:-}" = "--backups" ]; then
     local bc="${2:-}" bdir d
     # Registry-optional, like clone: gate on the backup DIRECTORY, not on the client
-    # existing in mandos, so a dev box with no registry can list the packets it holds.
+    # being registered, so a dev box with no registry can list the packets it holds.
     [ -n "$bc" ] || return 0
     bdir="$(client_backup_dir "$bc")"
     [ -d "$bdir" ] || return 0
@@ -78,8 +88,9 @@ _list_dev_site() { # name
 }
 
 _list_all_clients() {
-  local client backup_dir count latest
-  printf '%-16s %-8s %s\n' "CLIENT" "BACKUPS" "LATEST" >&2
+  local client backup_dir count latest access acc_list
+  acc_list="$(access_clients)"
+  printf '%-16s %-8s %-18s %s\n' "CLIENT" "BACKUPS" "LATEST" "ACCESS" >&2
   while IFS= read -r client; do
     [ -n "$client" ] || continue
     backup_dir="$(client_backup_dir "$client")"
@@ -91,7 +102,10 @@ _list_all_clients() {
     else
       count=0; latest="-"
     fi
-    printf '%-16s %-8s %s\n' "$client" "$count" "${latest:--}"
+    # Registries aren't linked: a client can outlive its mandos access (local-only).
+    access="yes"
+    printf '%s\n' "$acc_list" | grep -qxF "$client" || access="none (local only)"
+    printf '%-16s %-8s %-18s %s\n' "$client" "$count" "${latest:--}" "$access"
   done < <(config_clients)
 }
 

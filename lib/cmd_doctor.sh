@@ -59,18 +59,18 @@ cmd_doctor() {
   fi
 
   # --- Role -----------------------------------------------------------------
-  # mandos owns the client registry, SSH-key onboarding and the Drive root. A dev box
+  # mandos is the keyholder (production access + the Drive root). A dev box
   # deliberately has none of it and runs clone/new/inject/lifecycle without it, so its
   # absence is informational. See DEVBOX-PLAN.md.
   echo >&2
   local role="dev box"
   if have "$MANDOS_BIN"; then
     role="gateway"
-    log_ok "mandos present — client registry available (role: gateway)"
+    log_ok "mandos present — production access available (role: gateway)"
   else
     log_info "mandos not installed → role: dev box"
     log_info "  available: clone, new, inject, start/stop/destroy, db, status, list"
-    log_info "  unavailable (gateway-only): backup, build, upgrade, apply, redirect, prune, client, test"
+    log_info "  unavailable (gateway-only): backup, build, upgrade, apply, redirect, prune, hold, test"
   fi
 
   # Config
@@ -80,20 +80,25 @@ cmd_doctor() {
     log_info "  base_dir: $(config_base_dir)"
     log_info "  dev-site host suffix: .$(config_dev_suffix)"
     if have yq && [ "$role" = "gateway" ]; then
-      # Team config (shared client definitions in Drive), when configured.
-      local team; team="$(_team_config_path)"
-      if [ -n "$team" ]; then
-        if [ -f "$team" ]; then
-          log_ok "team config reachable at $team"
+      # Both shared registries on the Drive: mandos (access) and wpsite's own.
+      local label file conflicts
+      for label in mandos wpsite; do
+        if [ "$label" = mandos ]; then file="$(_team_config_path)"; else file="$(wpsite_team_file)"; fi
+        [ -n "$file" ] || { log_warn "$label registry: not configured"; continue; }
+        if [ -f "$file" ]; then
+          log_ok "$label registry reachable at $file"
           # A Drive "conflicted copy" means two people wrote it at once — flag it.
-          local conflicts; conflicts="$(find "$(dirname "$team")" -maxdepth 1 -iname '*conflicted*' 2>/dev/null | grep -c . || true)"
+          conflicts="$(find "$(dirname "$file")" -maxdepth 1 -iname '*conflicted*' 2>/dev/null | grep -c . || true)"
           [ "$conflicts" -gt 0 ] && log_warn "  $conflicts 'conflicted copy' file(s) next to it — resolve them (concurrent edits)"
+        elif [ "$label" = wpsite ] && [ -d "$(dirname "$(dirname "$file")")" ]; then
+          log_warn "wpsite registry not created yet: $file (run: wpsite migrate-registry)"
         else
-          log_warn "team config set but NOT reachable: $team (is Google Drive mounted?)"
+          log_warn "$label registry NOT reachable: $file (is Google Drive mounted?)"
         fi
-      fi
-      local n; n="$(config_clients 2>/dev/null | grep -c . || true)"
-      log_info "  $n client(s) configured"
+      done
+      local n na; n="$(config_clients 2>/dev/null | grep -c . || true)"
+      na="$(access_clients 2>/dev/null | grep -c . || true)"
+      log_info "  $n client(s) in wpsite, $na with access in mandos"
     fi
     local d; d="$(config_dev_sites 2>/dev/null | grep -c . || true)"
     log_info "  $d dev site(s) configured"

@@ -89,10 +89,11 @@ a **team** file in Google Drive holds the shared `clients:` map. Clients live in
 the whole team shares one source of truth; dev sites and machine paths stay local and are
 never propagated.
 
-- **A new colleague / new machine runs `wpsite setup`** — it writes the local config and
-  installs their SSH key on every client in the team config (sharing the config does NOT
-  share access; SSH keys are per-person). After adding a new client, `wpsite setup
-  --keys-only` gets the rest of the team access.
+- **Two registries, not linked:** mandos = access (ssh, wp_root, Drive folder, SSH keys);
+  wpsite's own file on the Drive = WordPress settings per client (hold/manual lists,
+  deactivate list, …). A client mandos knows joins wpsite with its **first `wpsite
+  backup`**. A new machine runs `wpsite setup` (base_dir + mandos config); SSH keys come
+  from `mandos client setup-key <client>` — wpsite never installs keys.
 - If someone reports *"no clients / team config unreachable"*, their **Google Drive isn't
   mounted** — the client definitions live there. Client edits also refuse to write when
   Drive is unmounted (so nothing is silently written to the wrong place).
@@ -115,8 +116,8 @@ retired — the dispatcher points you to `build`/`start` or `stop`/`destroy`.
 
 **Onboarding:**
 ```bash
-wpsite setup                    # write local config + install SSH keys for all team clients
-wpsite setup --keys-only        # skip config; just (re)install keys for team clients
+wpsite setup                    # write local config + point mandos at the registry; checks both registries
+mandos client setup-key <c>     # your SSH key on a client's server (mandos is the keyholder)
 ```
 
 **Backups** (real media by default; `--light` = blank placeholders, smaller):
@@ -145,13 +146,16 @@ wpsite inject  <devsite> [--from <path>] [--slug <name>] [--activate [--network]
 wpsite upgrade <client> [--noreview]   # rehearse core/plugin/theme updates locally + report
 wpsite review  <client>                # re-open the latest before/after screenshot page
 wpsite apply   <client>                # run the rehearsed upgrade ON PRODUCTION (irreversible!)
+wpsite apply   <client> --check        # preflight only (read-only) — e.g. before a maintenance round
 ```
 
 **Clients:**
 ```bash
-wpsite client add [name]            # onboard (wizard on TTY, else flags: --ssh/--wp-root/…)
-wpsite client edit <name>           # change fields (interactive or --ssh/--wp-root/… ; --unset <key>)
-wpsite client remove <name> [--purge]   # remove client + replica (--purge also deletes local backups)
+mandos client add <name> --ssh <u@h> --wp-root <p>   # ACCESS: onboard a client (mandos)
+wpsite show   <client> [<key>]         # everything wpsite knows (+ its mandos access)
+wpsite hold   <client> [<slug> [--reason "…"] [--remove]]   # never auto-update this plugin/theme
+wpsite manual <client> [<item> …]      # reminder: update by hand in wp-admin (WP-CLI can't see it)
+wpsite forget <client> [--purge]       # drop from wpsite (mandos access + cloud untouched)
 ```
 
 **Shared services & inspection:**
@@ -170,13 +174,19 @@ wpsite prune  <client> [<id>] [--keep N|--older-than Nd|--all] [--dry-run] [--ye
 ## Common workflows
 
 - **Onboard a client, then get a local copy:**
-  `wpsite client add acme` → `wpsite test acme` → `wpsite backup acme` → `wpsite build acme`
+  `mandos client add acme …` → `wpsite test acme` → `wpsite backup acme` (registers it) → `wpsite build acme`
   → open `http://acme.test`.
 - **Quick dev sandbox from a client (fast, small):**
   `wpsite clone acme acme-dev --light` — namespaced under `acme-dev.test`.
-- **Rehearse an upgrade before touching prod:**
-  `wpsite build acme` → `wpsite upgrade acme` (review the screenshot page) → only if
-  clean, `wpsite apply acme` (types confirmation, takes a fresh backup first).
+- **Rehearse an upgrade before touching prod (the retainer workflow):**
+  `wpsite backup acme` → `wpsite build acme` → `wpsite upgrade acme` (review the screenshot
+  page; the **briefing** at the end lists every plugin/theme that didn't update with its
+  class — no-package / refused / error / fatal / held / manual — and offers to put
+  pro/custom ones on the hold list) → `wpsite apply acme`. Apply runs a **preflight** first
+  (aborts with production untouched if anything's off), holds a maintenance gate that
+  survives WordPress's updater, and ends EVERY run — also a failed one — with a final
+  check: live pages + a test mail to our inbox. If the site doesn't boot at the end it
+  keeps the 503 up deliberately and says how to lift it.
 - **Peek at a replica's data:** `wpsite db acme` (opens Adminer already logged in).
 
 ## Guardrails — respect these

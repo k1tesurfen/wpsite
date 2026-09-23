@@ -45,7 +45,7 @@ cmd_clone() {
   [ -n "$devname" ] || die "$usage"
 
   _valid_site_name "$devname" || die "Invalid dev site name '$devname' (use lowercase letters, digits, hyphens)."
-  [ -z "$(target_kind "$devname")" ] || die "'$devname' already exists as a $(target_kind "$devname"). Choose another name."
+  if _name_taken "$devname"; then die "'$devname' already exists as a $(target_kind "$devname" | grep . || echo "mandos client"). Choose another name."; fi
 
   _ensure_base_layout
 
@@ -91,7 +91,7 @@ cmd_clone() {
   # Plugin sanitization extras: explicit flag wins; otherwise fall back to the client
   # registry, which yields the list on the gateway and empty on a registry-less dev box
   # (client_get is || true-wrapped, so a missing mandos is not an error here).
-  [ -n "$deactivate" ] || deactivate="$(client_get "$source" deactivate_plugins)"
+  [ -n "$deactivate" ] || deactivate="$(wclient_get "$source" deactivate_plugins)"
 
   # Register the dev site (written before the build so a failed build is cleanable
   # via `wpsite destroy $devname`).

@@ -20,6 +20,7 @@ clients:
 EOF
   export WPSITE_CONFIG="$CFG"
   export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_build.sh"        # provides _ensure_wp_cli (start reinstalls it)
   source "$REPO/lib/cmd_lifecycle.sh"

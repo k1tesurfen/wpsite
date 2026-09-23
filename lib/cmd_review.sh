@@ -18,7 +18,7 @@ WPSITE_REVIEW_DISMISS_DEFAULTS="${WPSITE_REVIEW_DISMISS_DEFAULTS:-#usercentrics-
 # Combined dismiss selectors for a client: built-in defaults + configured extras.
 # Space-separated on one line (the shot script splits on whitespace).
 _review_dismiss() { # client
-  local extra; extra="$(client_get "$1" review_dismiss 2>/dev/null | tr '\n' ' ')"
+  local extra; extra="$(wclient_get "$1" review_dismiss 2>/dev/null | tr '\n' ' ')"
   printf '%s %s\n' "$WPSITE_REVIEW_DISMISS_DEFAULTS" "$extra" | tr -s ' ' | sed 's/ *$//'
 }
 
@@ -48,7 +48,7 @@ _review_pages() { # client app_container local_url
   local client="$1" app="$2" url="$3" configured
   {
     printf '%s\n' "$url"
-    configured="$(client_get "$client" review_pages)"
+    configured="$(wclient_get "$client" review_pages)"
     if [ -n "$configured" ]; then
       printf '%s\n' "$configured" | while IFS= read -r p; do
         [ -z "$p" ] && continue

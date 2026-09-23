@@ -6,6 +6,7 @@ cmd_test() {
   [ -n "$client" ] || die "Specify a <client> to test remote readiness."
   config_require_registry
   require_client "$client"
+  require_access "$client"
 
   local ssh_target wp_root
   ssh_target="$(client_get "$client" ssh)"

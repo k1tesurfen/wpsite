@@ -150,5 +150,6 @@ clients:
   ```bash
   client_get "acme" "ssh"     # -> mandos client get acme ssh
   ```
-* Manage clients with `mandos client add/set/unset/remove/setup-key` (or the `wpsite
-  client add/edit/remove` wrappers, which write through mandos).
+* Access (ssh, wp_root, keys) is mandos's: `mandos client add/set/unset/remove/setup-key`.
+  WordPress settings live in wpsite's own registry (`wpsite show|hold|manual|forget`);
+  a client joins wpsite with its first `wpsite backup`. The two are not linked.

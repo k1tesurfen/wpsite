@@ -20,6 +20,7 @@ clients:
 EOF
   export WPSITE_CONFIG="$CFG"
   export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_apply.sh"      # _prod_wp lives here (we override it below)
   source "$REPO/lib/cmd_redirect.sh"

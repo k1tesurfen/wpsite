@@ -9,6 +9,7 @@ setup() {
   # MANDOS_BIN at a stub that serves them from MANDOS_STUB_CONFIG (defaults to
   # WPSITE_CONFIG — so the fixture's clients:/cloud_base: are served transparently).
   export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   source "$REPO/lib/common.sh"
 }
 

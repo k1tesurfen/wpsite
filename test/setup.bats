@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
 # `wpsite setup` — onboard a machine: write the wpsite local config (`base_dir` only),
-# point mandos at the shared registry (`mandos config init`), and install SSH keys on
-# every client. mandos is the stub (test/fixtures/mandos-stub): `config init` is recorded
-# to MANDOS_STUB_INITLOG, `client setup-key <name>` to MANDOS_STUB_KEYLOG, and the client
-# list is served from MANDOS_STUB_CONFIG (the TEAM file). Non-interactive throughout.
+# point mandos at the shared access registry (`mandos config init`), and report whether
+# both registries are reachable. It NEVER installs SSH keys (mandos is the keyholder).
+# mandos is the stub: `config init` → MANDOS_STUB_INITLOG, `client setup-key` →
+# MANDOS_STUB_KEYLOG. Non-interactive throughout.
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -27,11 +27,11 @@ EOF
 
   export WPSITE_CONFIG="$CFG"
   export MANDOS_BIN="$REPO/test/fixtures/mandos-stub"
+  export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   export MANDOS_STUB_CONFIG="$TEAM"          # stub serves clients + config get from here
   export MANDOS_STUB_KEYLOG="$KEYLOG" MANDOS_STUB_INITLOG="$INITLOG"
   source "$REPO/lib/common.sh"
   source "$REPO/lib/cmd_new.sh"       # _prompt
-  source "$REPO/lib/cmd_client.sh"    # _client_setup_ssh_key (→ mandos client setup-key)
   source "$REPO/lib/cmd_setup.sh"
 
   require() { :; }
@@ -51,44 +51,39 @@ EOF
   [[ "$output" == *"--cloud-base /drive/cloud"* ]]
 }
 
-@test "setup: installs the SSH key on every client (via mandos) + runs test" {
-  run cmd_setup --base-dir "$BASE" --team-config "$TEAM"
-  [ "$status" -eq 0 ]
-  run cat "$KEYLOG"
-  [[ "$output" == *alpha* ]]
-  [[ "$output" == *bravo* ]]
-  [ "$(grep -c . "$KEYLOG")" -eq 2 ]
-}
-
-@test "setup: --no-keys configures but installs no keys" {
-  run cmd_setup --base-dir "$BASE" --team-config "$TEAM" --no-keys
+@test "setup: never installs SSH keys; --no-keys/--no-test are accepted no-ops" {
+  run cmd_setup --base-dir "$BASE" --team-config "$TEAM" --no-keys --no-test
   [ "$status" -eq 0 ]
   [ ! -s "$KEYLOG" ]
-  run yq -r '.base_dir' "$CFG"; [ "$output" = "$BASE" ]
-  [ -s "$INITLOG" ]                     # mandos config init still ran
+  [[ "$output" == *"mandos client setup-key"* ]]      # points at the keyholder
+  [ -s "$INITLOG" ]                                   # mandos config init still ran
 }
 
-@test "setup: --keys-only skips config writing + mandos init" {
-  printf 'base_dir: %s\n' "$BASE" > "$CFG"   # pre-existing wpsite config
+@test "setup: key flags are refused with a pointer to mandos" {
   run cmd_setup --keys-only
+  [ "$status" -ne 0 ]; [[ "$output" == *"mandos client setup-key"* ]]
+}
+
+@test "setup: reports a not-yet-created wpsite registry with the migration hint" {
+  export WPSITE_TEAM_CONFIG="$BATS_TEST_TMPDIR/wp/wpsite.team.yml"
+  run cmd_setup --base-dir "$BASE" --team-config "$TEAM"
   [ "$status" -eq 0 ]
-  [ "$(grep -c . "$KEYLOG")" -eq 2 ]
-  [ ! -s "$INITLOG" ]                   # no `config init` on --keys-only
+  [[ "$output" == *"migrate-registry"* ]]
 }
 
 @test "setup: creates the local data layout (clients/ + dev/)" {
-  run cmd_setup --base-dir "$BASE" --team-config "$TEAM" --no-keys
+  run cmd_setup --base-dir "$BASE" --team-config "$TEAM"
   [ "$status" -eq 0 ]
   [ -d "$BASE/clients" ]
   [ -d "$BASE/dev" ]
 }
 
-@test "setup: registry unreachable -> warns, installs nothing, still exits 0" {
-  export MANDOS_STUB_CONFIG="$BATS_TEST_TMPDIR/gone.yml"   # team file doesn't exist
-  run cmd_setup --base-dir "$BASE" --team-config "$BATS_TEST_TMPDIR/gone.yml"
+@test "setup: registries unreachable -> warns, still exits 0" {
+  export MANDOS_STUB_CONFIG="$BATS_TEST_TMPDIR/gone/x/gone.yml"   # team file doesn't exist
+  export WPSITE_TEAM_CONFIG="$BATS_TEST_TMPDIR/gone/x/w.yml"
+  run cmd_setup --base-dir "$BASE" --team-config "$BATS_TEST_TMPDIR/gone/x/gone.yml"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not found"* ]]
-  [ ! -s "$KEYLOG" ]
+  [[ "$output" == *"not reachable"* ]]
 }
 
 @test "setup: non-interactive without required fields fails" {

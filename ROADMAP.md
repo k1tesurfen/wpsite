@@ -8,7 +8,7 @@ production in place.
 
 ```
 mandos config init  ·  mandos client add|setup-key         # clients + SSH keys live in mandos now
-wpsite client add|edit|remove <name>       # thin wrappers that write through mandos
+wpsite show|hold|manual|forget <name>      # wpsite's OWN registry (registries split)
 wpsite backup  <client> [--full] [--all]   # remote → local artifacts
 wpsite build   <client>                    # artifacts → running Docker replica
 wpsite start | stop | destroy <client>     # lifecycle of a built replica
@@ -141,17 +141,12 @@ otherwise. Deep mechanics live in `CLAUDE.md`; this is the what/why.
   `base_dir` + `dev:`. The `wpsite client`/`setup` commands and the GUI were updated
   accordingly (GUI dropped client-management + setup buttons); `cmd_setup` is pending a final
   rework. See CLAUDE.md "Client registry … OWNED BY MANDOS".
-- **`wpsite client add|edit|remove` — ✅ done** (now thin wrappers over the mandos registry).
-  **add:** onboarding wizard — prompts name/ssh/wp_root (+ cloud_folder when cloud sync is
-  on, + gated advanced overrides), writes the entry via `client_set` (→ **mandos**,
-  comment-preserving), installs the SSH key via `mandos client setup-key` (probe →
-  `ssh-copy-id` → manual `authorized_keys` append on macOS; generates a local key if none),
-  then runs `wpsite test` — a failed test only warns and keeps the entry. **edit:** interactive (Enter keeps each current
-  value) or flag-driven field changes, `--unset` for optionals, re-tests only when
-  ssh/wp_root changed; rename intentionally unsupported. **remove:** tears down the
-  replica + drops the config entry, keeps local backups unless `--purge`, never touches
-  cloud; typed-name confirm for `--purge`, `[y/N]` otherwise. Scriptable via flags for the
-  GUI. `test/client.bats`.
+- **Registry split — ✅ done (2026-09, HARDENING-PLAN.md Phase 1).** mandos is the keyholder
+  (ssh, wp_root, Drive project folder only); wpsite has its OWN shared registry
+  (`…/01_Global/wpsite/wpsite.team.yml`) for everything WordPress, not linked to mandos.
+  `wpsite client add|edit|remove` were removed (access → `mandos client …`); new
+  `wpsite show|hold|manual|forget` + one-off `wpsite migrate-registry`. A client joins wpsite
+  with its first `wpsite backup`. `test/registry.bats`.
 
 ### Upgrade workflow — the quarterly retainer
 
