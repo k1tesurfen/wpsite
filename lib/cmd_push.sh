@@ -58,6 +58,17 @@ cmd_push() {
 …or pass --devbox <host> / set WPSITE_DEVBOX."
   local rbase; rbase="$(config_devbox_base)"
 
+  # Easy mix-up: reading the 2nd argument as "which dev box" (`push ksk nargothrond`)
+  # silently builds a dev site NAMED after the box (nargothrond.dev.test). The box comes
+  # from the config / --devbox, never from a positional argument — so refuse a dev-site
+  # name equal to the box's host name (user@ and any domain stripped) before transferring.
+  local box_short="${devbox##*@}"; box_short="${box_short%%.*}"
+  box_short="$(printf '%s' "$box_short" | tr '[:upper:]' '[:lower:]')"
+  [ "$devname" != "$box_short" ] || die "'$devname' is your dev box, not a dev-site name.
+  The 2nd argument names the dev SITE (default: $client-dev → $client-dev.dev.test);
+  the dev box comes from devbox.host in $WPSITE_CONFIG ($devbox) or --devbox <host>.
+  Did you mean:  wpsite push $client          (or: wpsite push $client <sitename>)"
+
   # --- 1. The packet: an existing backup (default), or a fresh one from production ---
   # Default is the newest COMPLETE local backup — symmetric with `clone`, and matching
   # the two-step Workflow B example in DEVBOX-PLAN.md §2 (`backup --light <c>` then

@@ -13,7 +13,7 @@ setup() {
   CACHE="$BATS_TEST_TMPDIR/cache.phar"; echo "phar-v1" > "$CACHE"
   REMOTE="$BATS_TEST_TMPDIR/remote.phar"
   CALLS="$BATS_TEST_TMPDIR/calls"; : > "$CALLS"
-  HOST_WP_OK=1; PHAR_OK=1
+  HOST_WP_OK=1; PHAR_OK=1; HOST_ARGS_OK=1; PHAR_ARGS_OK=1
   client_get() { case "$2" in ssh) echo u@h ;; wp_root) echo /var/www/x ;; esac; }
   _wp_cli_cache()      { printf '%s' "$CACHE"; }
   _wp_cli_cache_warm() { [ -s "$CACHE" ]; }
@@ -24,6 +24,11 @@ setup() {
       *"cat >"*)                   cat > "$REMOTE" ;;
       *"wp-cli.phar\" core version"*) [ "$PHAR_OK" = 1 ] ;;
       *"&& wp core version"*)      [ "$HOST_WP_OK" = 1 ] ;;
+      # The argument probe: a splitting wrapper answers with wp-cli's error instead.
+      *"wp-cli.phar\" eval --skip-wordpress"*)
+        if [ "$PHAR_ARGS_OK" = 1 ]; then echo "WPSITE ARGS OK"; else echo "Error: Too many positional arguments"; fi ;;
+      *"&& wp eval --skip-wordpress"*)
+        if [ "$HOST_ARGS_OK" = 1 ]; then echo "WPSITE ARGS OK"; else echo "Error: Too many positional arguments"; return 1; fi ;;
       *)                           echo "ran: $*" ;;
     esac
   }
@@ -43,6 +48,29 @@ setup() {
   _WPSITE_WP_PREPARED=""; _remote_wp_prepare acme 2>/dev/null
   [ "$_WPSITE_WP_BUNDLED" = 1 ]
   cmp -s "$CACHE" "$REMOTE"
+}
+
+@test "prepare: host wp runs but SPLITS arguments (ksk's wrapper) -> bundled phar, says why" {
+  HOST_ARGS_OK=0
+  run _remote_wp_prepare acme
+  [[ "$output" == *"splits arguments at spaces"* ]]
+  [[ "$output" == *"using bundled wp-cli"* ]]
+  _WPSITE_WP_PREPARED=""; _remote_wp_prepare acme 2>/dev/null
+  [ "$_WPSITE_WP_BUNDLED" = 1 ]
+  [ "$(_remote_wp_cmd)" != wp ]
+  cmp -s "$CACHE" "$REMOTE"
+}
+
+@test "prepare: bundled phar that ALSO fails the argument probe is not used" {
+  HOST_ARGS_OK=0; PHAR_ARGS_OK=0
+  _remote_wp_prepare acme 2>/dev/null
+  [ "$_WPSITE_WP_BUNDLED" = 0 ]
+}
+
+@test "_remote_wp_args_ok: an echo of the command line itself never counts as the marker" {
+  wpsite_ssh() { shift; printf 'ran: %s\n' "$*"; }
+  run _remote_wp_args_ok u@h /r wp
+  [ "$status" -ne 0 ]
 }
 
 @test "prepare: re-uploads only when the phar changed; repeat calls are free" {
@@ -80,7 +108,8 @@ setup() {
     _wp_cli_cache() { printf "%s" "$CACHE"; }; _wp_cli_cache_warm() { [ -s "$CACHE" ]; }
     wpsite_ssh() { shift; case "$*" in
       cksum*) return 1 ;; *"cat >"*) cat > "$REMOTE" ;;
-      *"wp-cli.phar\" core version"*) return 0 ;; *) return 255 ;; esac; }
+      *"wp-cli.phar\" core version"*) return 0 ;;
+      *"wp-cli.phar\" eval --skip-wordpress"*) echo "WPSITE ARGS OK" ;; *) return 255 ;; esac; }
     _remote_wp_prepare acme; echo "bundled=$_WPSITE_WP_BUNDLED"'
   [ "$status" -eq 0 ]
   [[ "$output" == *"bundled=1"* ]]

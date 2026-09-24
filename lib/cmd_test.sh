@@ -93,7 +93,21 @@ cmd_test() {
   local wp_version
   wp_version="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && $wp_cmd core version --allow-root 2>/dev/null" | tr -d '\r' || true)"
   if [ -n "$wp_version" ]; then
-    log_ok "  WP-CLI can boot and connect to DB. WordPress Version: $wp_version"
+    log_ok "  WP-CLI runs. WordPress Version: $wp_version"
+    # `core version` only reads version.php — no DB, no plugins, no spaces in its args.
+    # Run apply's OWN preflight boot check (same functions, so they can't drift): ksk
+    # passed this test for months while apply refused it, because its wp wrapper
+    # re-splits arguments and `wp eval '…'` never got through.
+    local boot_err
+    if _prod_wp "$ssh_target" "$wp_root" core is-installed </dev/null >/dev/null 2>&1 \
+       && _site_boots _prod_wp "$ssh_target" "$wp_root"; then
+      log_ok "  WordPress boots with all plugins and the DB connects (apply's preflight check)"
+    else
+      boot_err="$(_prod_wp "$ssh_target" "$wp_root" eval 'echo "WPSITE_BOOT_OK";' </dev/null 2>&1 | tail -n 5 || true)"
+      log_error "  WordPress does NOT boot via WP-CLI — apply's preflight would refuse this site!"
+      log_error "  Error output: ${boot_err:-<none>}"
+      fail=1
+    fi
   else
     # Try running it natively or check if there is an error
     local raw_error; raw_error="$(wpsite_ssh "$ssh_target" "cd '$wp_root' && $wp_cmd core version --allow-root 2>&1" || true)"

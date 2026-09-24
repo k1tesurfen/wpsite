@@ -19,6 +19,9 @@ EOF
   export MANDOS_BIN="$BATS_TEST_DIRNAME/fixtures/mandos-stub"   # client registry via stub
   export WPSITE_TEAM_CONFIG="${MANDOS_STUB_CONFIG:-$WPSITE_CONFIG}"   # wpsite registry = same fixture
   source "$REPO/lib/common.sh"
+  source "$REPO/lib/cmd_build.sh"
+  source "$REPO/lib/cmd_upgrade.sh"
+  source "$REPO/lib/cmd_apply.sh"     # _prod_wp + _site_boots: step 4 runs apply's boot check
   source "$REPO/lib/cmd_test.sh"
 
   # Stub SSH setup/closing helpers
@@ -49,6 +52,15 @@ EOF
       *"[ -d '/var/www/acme' ]"*)
         return 0
         ;;
+      *"eval --skip-wordpress"*)
+        echo "WPSITE ARGS OK"
+        ;;
+      *"core is-installed"*)
+        return 0
+        ;;
+      *WPSITE_BOOT_OK*)
+        echo "WPSITE_BOOT_OK"
+        ;;
       *"which wp"*)
         echo "/usr/local/bin/wp"
         ;;
@@ -63,7 +75,8 @@ EOF
   [[ "$output" == *"SSH Connection: SUCCESSFUL"* ]]
   [[ "$output" == *"tar: OK"* ]]
   [[ "$output" == *"Directory '/var/www/acme' exists on remote."* ]]
-  [[ "$output" == *"WP-CLI can boot and connect to DB. WordPress Version: 6.5"* ]]
+  [[ "$output" == *"WP-CLI runs. WordPress Version: 6.5"* ]]
+  [[ "$output" == *"WordPress boots with all plugins"* ]]
   [[ "$output" == *"100% READY for backup and apply"* ]]
 }
 
@@ -207,6 +220,9 @@ EOF
     *"cat >"*)      cat >/dev/null ;;
     *"wp-cli.phar\" core version --allow-root 2>/dev/null"*) echo "7.0.6" ;;
     *"wp-cli.phar\" core version"*) return 0 ;;
+    *"wp-cli.phar\" eval --skip-wordpress"*) echo "WPSITE ARGS OK" ;;
+    *"wp-cli.phar\" core is-installed"*) return 0 ;;
+    *"wp-cli.phar\" eval"*WPSITE_BOOT_OK*) echo "WPSITE_BOOT_OK" ;;
     *)              echo "PHP Fatal error: Failed opening required wpt-wp-cli.php"; return 255 ;;
   esac; }
   run cmd_test acme
@@ -214,4 +230,29 @@ EOF
   [[ "$output" == *"using bundled wp-cli"* ]]
   [[ "$output" == *"WordPress Version: 7.0.6"* ]]
   [[ "$output" == *"100% READY"* ]]
+}
+
+# Regression (ksk, maute-areal): Mittwald's old wrapper ends in `php_cli wp-cli.phar $@`
+# (unquoted), so `wp core version` works but `wp eval 'echo "…";'` is re-split and dies.
+# `test` used to say READY while apply's preflight refused the site. Here no bundled phar
+# can take over (no cache), so the split must surface as a FAILED test with the error.
+@test "test: wp runs but WordPress doesn't boot via WP-CLI (split args) -> FAILS like apply's preflight" {
+  _wp_cli_cache_warm() { return 1; }
+  wpsite_ssh() { shift; case "$*" in
+    *SSH_OK*)       echo SSH_OK ;;
+    *"for cmd in"*) printf "tar: OK\nphp: OK\n" ;;
+    *"[ -d "*)      return 0 ;;
+    # wp-cli writes its errors to STDERR (as on ksk) — _site_boots discards them.
+    *" eval "*)     echo 'Error: Too many positional arguments: "WPSITE_BOOT_OK";' >&2; return 1 ;;
+    *"core is-installed"*) return 0 ;;
+    *"which wp"*)   echo /usr/local/bin/wp ;;
+    *"wp core version"*) echo "7.1.2" ;;
+  esac; }
+  run cmd_test acme
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"splits arguments at spaces"* ]]
+  [[ "$output" == *"WP-CLI runs. WordPress Version: 7.1.2"* ]]
+  [[ "$output" == *"WordPress does NOT boot via WP-CLI"* ]]
+  [[ "$output" == *"Too many positional arguments"* ]]
+  [[ "$output" != *"100% READY"* ]]
 }

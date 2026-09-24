@@ -482,3 +482,27 @@ run_push() { # args...
   [[ "$output" == *"packet IS on the dev box"* ]]
   [[ "$output" == *"wpsite clone acme acme-dev --backup 20260101_120000"* ]]
 }
+
+@test "push: dev-site name == the dev box's host name -> refused before any transfer" {
+  push_setup                                   # devbox.host: devbox.tailnet
+  run_push acme devbox
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"'devbox' is your dev box, not a dev-site name"* ]]
+  [[ "$output" == *"wpsite push acme "* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push: the host-name guard strips user@ and the domain (--devbox / WPSITE_DEVBOX)" {
+  push_setup
+  run_push acme nargothrond --devbox me@nargothrond.tail1234.ts.net
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is your dev box"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push: a dev-site name that merely CONTAINS the box name is fine" {
+  push_setup
+  run_push acme devbox-ksk --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"wpsite clone acme devbox-ksk"* ]]
+}

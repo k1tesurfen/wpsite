@@ -807,6 +807,15 @@ ssh_close_mux() {
 # one builds use) into the remote $HOME and runs `php <phar>` instead. Detected, not
 # configured: no registry key. The host's wp stays the first choice because managed hosts'
 # wrappers (Mittwald) pick the site's PHP version, which a bare `php` might not.
+#
+# "Runs" is not enough, though: the host's wp must also pass ARGUMENTS intact. Some
+# Mittwald accounts (ksk, maute-areal) carry an old wrapper ending in
+# `php_cli wp-cli.phar $@` — unquoted, so every argument is re-split at spaces.
+# `wp core version` still works, but `wp eval 'echo "…";'` (apply's boot check, the
+# preflight's HTTPS probe, the test mail) and `wp db query "SELECT …"` all die with
+# "Too many positional arguments". apply then reported "WP-CLI can't boot WordPress" on a
+# perfectly healthy site while `wpsite test` said READY. _remote_wp_args_ok probes this
+# (without booting WordPress), and a splitting wrapper counts as unusable.
 WPSITE_REMOTE_PHAR=".wpsite/wp-cli.phar"   # relative to the REMOTE $HOME
 _WPSITE_WP_BUNDLED=0                        # read by _prod_wp / _remote_wp_cmd
 _WPSITE_WP_PREPARED=""                      # client already probed in this process
@@ -820,9 +829,12 @@ _remote_wp_prepare() { # client
   _WPSITE_WP_PREPARED="$client"
   _WPSITE_WP_BUNDLED=0
   t="$(client_get "$client" ssh)"; root="$(client_get "$client" wp_root)"
-  wpsite_ssh "$t" "cd '$root' && wp core version --allow-root >/dev/null 2>&1" </dev/null && return 0
-
-  log_warn "$client: the host's wp-cli does not boot the site from this SSH login — trying wpsite's bundled wp-cli"
+  if wpsite_ssh "$t" "cd '$root' && wp core version --allow-root >/dev/null 2>&1" </dev/null; then
+    _remote_wp_args_ok "$t" "$root" wp && return 0
+    log_warn "$client: the host's wp-cli splits arguments at spaces (a wrapper with an unquoted \$@) — wp eval / db query would fail; trying wpsite's bundled wp-cli"
+  else
+    log_warn "$client: the host's wp-cli does not boot the site from this SSH login — trying wpsite's bundled wp-cli"
+  fi
   _wp_cli_cache_warm || { log_warn "  no local wp-cli.phar to upload (run: wpsite prefetch)"; return 0; }
   cache="$(_wp_cli_cache)"
   want="$(cksum < "$cache" | awk '{print $1 "-" $2}')"
@@ -836,13 +848,23 @@ _remote_wp_prepare() { # client
       || { log_warn "  could not upload wp-cli.phar to the remote home"; return 0; }
   fi
   _WPSITE_WP_BUNDLED=1
-  if wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) core version --allow-root >/dev/null 2>&1" </dev/null; then
+  if wpsite_ssh "$t" "cd '$root' && $(_remote_wp_cmd) core version --allow-root >/dev/null 2>&1" </dev/null \
+     && _remote_wp_args_ok "$t" "$root" "$(_remote_wp_cmd)"; then
     log_warn "  using bundled wp-cli (~/$WPSITE_REMOTE_PHAR) for $client"
   else
     _WPSITE_WP_BUNDLED=0
     log_warn "  the bundled wp-cli does not boot the site either — keeping the host's wp"
   fi
   return 0
+}
+
+# Does <wp_cmd> on the server receive an argument containing spaces as ONE argument?
+# `eval --skip-wordpress` loads no WordPress (no DB, no plugins), so it is a pure
+# argument-passing probe, safe on production. The marker is concatenated in PHP, so an
+# echo of the command line itself (a stub, an error message) can never match it.
+_remote_wp_args_ok() { # ssh_target wp_root wp_cmd
+  wpsite_ssh "$1" "cd '$2' && $3 eval --skip-wordpress 'echo \"WPSITE ARGS\" . \" OK\";' --allow-root 2>/dev/null" </dev/null \
+    | tr -d '\r' | grep -qx 'WPSITE ARGS OK'
 }
 
 # The remote command that invokes wp-cli, as a string for a remote shell (the $HOME

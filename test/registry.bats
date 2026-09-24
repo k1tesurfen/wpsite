@@ -293,6 +293,7 @@ EOF
 # --- `wpsite test` registers too (workflow: mandos client add → wpsite test) ----------
 
 _stub_test_remote() { # pass|fail
+  source "$REPO/lib/cmd_upgrade.sh"; source "$REPO/lib/cmd_apply.sh"   # step 4's boot check
   source "$REPO/lib/cmd_test.sh"
   ssh_setup_mux() { :; }; ssh_close_mux() { :; }; _remote_wp_prepare() { :; }
   TEST_MODE="$1"
@@ -300,6 +301,8 @@ _stub_test_remote() { # pass|fail
     *SSH_OK*)       echo SSH_OK ;;
     *"for cmd in"*) printf 'tar: OK\nphp: OK\nmysql: OK\nmysqldump: OK\n' ;;
     *"[ -d "*)      [ "$TEST_MODE" = pass ] ;;
+    *"core is-installed"*) [ "$TEST_MODE" = pass ] ;;
+    *WPSITE_BOOT_OK*) [ "$TEST_MODE" = pass ] && echo WPSITE_BOOT_OK ;;
     *"which wp"*)   echo /usr/local/bin/wp ;;
     *"core version"*) [ "$TEST_MODE" = pass ] && echo 7.1.2 ;;
   esac; }
