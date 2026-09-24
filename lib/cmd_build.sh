@@ -746,6 +746,20 @@ sendmail_path = "/usr/local/bin/wpsite-sendmail -t -i"
 EOF
 }
 
+# Lock display_errors OFF at the Apache/mod_php level, mounted into conf-enabled
+# (see _render_compose). WP_DEBUG_DISPLAY=false + the image's php.ini are not
+# enough: plugins call ini_set('display_errors', 1) at runtime and every WP_DEBUG
+# notice lands on the page (ksk: f12-cf7-doubleoptin does it unconditionally in a
+# constructor). A php_admin_flag can't be overridden by ini_set, so the replica
+# never prints errors; WP_DEBUG_LOG still writes them to wp-content/debug.log.
+_write_apache_php_conf() { # dest_file
+  cat <<'EOF' > "$1"
+# wpsite: errors go to wp-content/debug.log, never onto the page.
+php_admin_flag display_errors off
+php_admin_flag display_startup_errors off
+EOF
+}
+
 # Render the per-replica compose file. No published host port: the WordPress
 # container joins the shared proxy network so Traefik can reach it by name
 # (wp_<client>_app). db stays on the project's default network only.
@@ -798,6 +812,8 @@ $extra
       # Dev PHP limits (uploads/memory) — stock php:apache defaults cap uploads at
       # 2M, which blocks installing modestly sized plugins/themes. See _write_php_ini.
       - ./php-wpsite.ini:/usr/local/etc/php/conf.d/wpsite.ini:ro
+      # display_errors locked off (plugins can't ini_set it back). See _write_apache_php_conf.
+      - ./apache-wpsite.conf:/etc/apache2/conf-enabled/zz-wpsite.conf:ro
     networks:
       - default
       - proxy
@@ -960,6 +976,7 @@ _build_from_backup() { # latest target local_host deactivate_slugs [ms_ns]
 
   # Must exist as a FILE before `up -d`, or Docker creates a dir at the mount point.
   _write_php_ini php-wpsite.ini
+  _write_apache_php_conf apache-wpsite.conf
   _render_compose "$db_c" "$app_c" "$image" "$target" "$local_host" "$ms_php" "$table_prefix" > docker-compose.yml
 
   # Start the shared infra (proxy + Mailpit) — both create/use the proxy network

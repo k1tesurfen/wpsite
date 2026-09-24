@@ -346,3 +346,139 @@ case "$1 $2" in "client list") echo acme;; "client has") exit 0;; esac
   [ "$(WPSITE_CONFIG=$cfg config_devbox_base)" = "websites" ]
   [ -z "$(WPSITE_CONFIG=$cfg config_devbox_host)" ]
 }
+
+# --- push: the happy path, over stubbed ssh/rsync ---------------------------------
+# `ssh`/`rsync` are fakes prepended to PATH that log every call to $CALLS (one line
+# each), so the real transfer + remote build sequence is asserted without a network.
+# PUSH_RSYNC_FLAVOR picks what `rsync --version` claims to be (gnu | openrsync);
+# PUSH_SSH_FAIL_T=1 makes the `ssh -t` remote build fail.
+
+push_setup() {
+  PCFG="$BATS_TEST_TMPDIR/push-happy.yml"
+  CALLS="$BATS_TEST_TMPDIR/push-calls"; : > "$CALLS"
+  local root="$BATS_TEST_TMPDIR/root" b
+  cat > "$PCFG" <<YML
+base_dir: $root
+devbox:
+  host: devbox.tailnet
+  base_dir: websites
+clients:
+  acme:
+    ssh: u@h
+    wp_root: /var/www
+    deactivate_plugins:
+      - foo
+      - bar
+YML
+  # An older complete backup, and a NEWER incomplete one push must never select.
+  b="$root/clients/acme/backups/20260101_120000"; mkdir -p "$b"
+  echo sql > "$b/db.sql"; echo tar > "$b/wp-content.tar.gz"; echo "WP_VERSION=7.0" > "$b/meta.env"
+  mkdir -p "$root/clients/acme/backups/20260202_120000"
+  echo sql > "$root/clients/acme/backups/20260202_120000/db.sql"
+  b="$root/clients/acme/backups/20251212_080000"; mkdir -p "$b"
+  echo sql > "$b/db.sql"; echo tar > "$b/wp-content.tar.gz"; echo "WP_VERSION=6.9" > "$b/meta.env"
+
+  cat > "$BIN/ssh" <<'SH'
+#!/bin/sh
+echo "ssh $*" >> "$CALLS"
+[ "$1" = "-t" ] && [ "${PUSH_SSH_FAIL_T:-0}" = 1 ] && exit 1
+exit 0
+SH
+  cat > "$BIN/rsync" <<'SH'
+#!/bin/sh
+if [ "$1" = "--version" ]; then
+  if [ "${PUSH_RSYNC_FLAVOR:-gnu}" = openrsync ]; then echo "openrsync: protocol version 29"
+  else echo "rsync  version 3.2.7  protocol version 31"; fi
+  exit 0
+fi
+echo "rsync $*" >> "$CALLS"
+SH
+  chmod +x "$BIN/ssh" "$BIN/rsync"
+}
+
+run_push() { # args...
+  run env PATH="$BIN:$PATH" CALLS="$CALLS" WPSITE_CONFIG="$PCFG" WPSITE_TEAM_CONFIG="$PCFG" \
+      MANDOS_BIN="$REPO/test/fixtures/mandos-stub" MANDOS_STUB_CONFIG="$PCFG" \
+      PUSH_RSYNC_FLAVOR="${PUSH_RSYNC_FLAVOR:-gnu}" PUSH_SSH_FAIL_T="${PUSH_SSH_FAIL_T:-0}" \
+      "$REPO/bin/wpsite" push "$@"
+}
+
+@test "push --dry-run: newest COMPLETE backup, full remote command, touches nothing" {
+  push_setup
+  run_push acme --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Shipping latest local backup 20260101_120000"* ]]
+  [[ "$output" == *"devbox.tailnet:websites/clients/acme/backups/"* ]]
+  # Default dev name, the chosen id, and the registry's sanitize list as ONE quoted arg.
+  [[ "$output" == *"wpsite clone acme acme-dev --backup 20260101_120000 --deactivate foo\\ bar"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push --dry-run: --backup <id> and --replace shape the remote command" {
+  push_setup
+  run_push acme sandbox --backup 20251212_080000 --replace --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Shipping existing backup 20251212_080000"* ]]
+  [[ "$output" == *"wpsite destroy sandbox >/dev/null 2>&1; wpsite clone acme sandbox --backup 20251212_080000"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push: unknown --backup id dies before any transfer" {
+  push_setup
+  run_push acme --backup 19990101_000000
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push: no complete local backup -> points at backup/--fresh, transfers nothing" {
+  push_setup
+  rm -rf "$BATS_TEST_TMPDIR/root/clients/acme/backups/20260101_120000" \
+         "$BATS_TEST_TMPDIR/root/clients/acme/backups/20251212_080000"
+  run_push acme
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"No local backup for 'acme'"* ]]
+  [[ "$output" == *"--fresh"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+@test "push: real run = mkdir, rsync (GNU fast path), then ssh -t clone — in that order" {
+  push_setup
+  run_push acme
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$CALLS" | tr -d ' ')" = 3 ]
+  [[ "$(sed -n 1p "$CALLS")" == "ssh devbox.tailnet mkdir -p websites/clients/acme/backups" ]]
+  [[ "$(sed -n 2p "$CALLS")" == rsync\ * ]]
+  [[ "$(sed -n 2p "$CALLS")" == *"--append-verify"* ]]
+  [[ "$(sed -n 2p "$CALLS")" == *"--skip-compress=gz,"* ]]
+  [[ "$(sed -n 2p "$CALLS")" == *"/clients/acme/backups/20260101_120000 devbox.tailnet:websites/clients/acme/backups/" ]]
+  [[ "$(sed -n 3p "$CALLS")" == "ssh -t devbox.tailnet wpsite clone acme acme-dev --backup 20260101_120000 --deactivate foo\\ bar" ]]
+}
+
+@test "push: openrsync (macOS stock) gets only flags it understands" {
+  push_setup
+  PUSH_RSYNC_FLAVOR=openrsync run_push acme --no-clone
+  [ "$status" -eq 0 ]
+  local r; r="$(grep '^rsync ' "$CALLS")"
+  [[ "$r" == *"--progress"* ]]
+  [[ "$r" != *"--append-verify"* ]]
+  [[ "$r" != *"--skip-compress"* ]]
+  [[ "$r" != *"--info"* ]]
+}
+
+@test "push --no-clone: delivers the packet, never runs a remote build" {
+  push_setup
+  run_push acme --no-clone
+  [ "$status" -eq 0 ]
+  [ -z "$(grep '^ssh -t' "$CALLS" || true)" ]
+  grep -q '^rsync ' "$CALLS"
+  [[ "$output" == *"wpsite clone acme acme-dev --backup 20260101_120000"* ]]
+}
+
+@test "push: failed remote build -> non-zero, says the packet is there + how to retry" {
+  push_setup
+  PUSH_SSH_FAIL_T=1 run_push acme
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"packet IS on the dev box"* ]]
+  [[ "$output" == *"wpsite clone acme acme-dev --backup 20260101_120000"* ]]
+}

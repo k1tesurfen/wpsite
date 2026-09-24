@@ -88,6 +88,7 @@ cmd_new() {
 
   # Must exist as a FILE before `up -d`, or Docker creates a dir at the mount point.
   _write_php_ini php-wpsite.ini
+  _write_apache_php_conf apache-wpsite.conf
   _render_compose "$db_c" "$app_c" "$image" "$name" "$host" "" > docker-compose.yml
 
   # Shared infra must exist before the replica joins the proxy network.

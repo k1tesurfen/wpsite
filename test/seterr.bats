@@ -76,6 +76,16 @@ echo __REACHED__"; }
   [[ "$output" == *__REACHED__* ]]
 }
 
+@test "_write_apache_php_conf: locks display_errors off, returns 0" {
+  strict '
+    d="$(mktemp -d)"; cd "$d"
+    _write_apache_php_conf apache-wpsite.conf
+    grep -q "php_admin_flag display_errors off" apache-wpsite.conf || exit 97
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}
+
 @test "_deactivate_matching: no matching plugins -> does not abort" {
   run env REPO="$REPO" bash -c 'set -euo pipefail
     source "$REPO/lib/common.sh"; source "$REPO/lib/cmd_build.sh"

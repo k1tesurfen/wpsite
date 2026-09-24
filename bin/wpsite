@@ -67,10 +67,11 @@ Commands:
           --backup <id>      …use a specific backup
           --deactivate <s>   …extra plugin slugs to deactivate (no registry needed)
           --host <h>         …override the local hostname
-  push    <client> [<devname>]   GATEWAY: back up, ship the packet to the dev box over
-                      rsync, and build it there as a dev site
-          --light         …placeholder media (much smaller packet)
-          --backup <id>   …ship an existing backup (no production access)
+  push    <client> [<devname>]   GATEWAY: ship the newest local backup to the dev box
+                      over rsync and build it there as a dev site (default <client>-dev)
+          --backup <id>   …ship a specific backup instead of the newest
+          --fresh         …take a new backup from production first
+          --light         …with --fresh: placeholder media (much smaller packet)
           --replace       …destroy an existing dev site there first
           --no-clone --dry-run --devbox <host>
   inject  <devsite>   Live-mount a local plugin into a dev site (default: ~/git/aule)
