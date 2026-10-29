@@ -176,3 +176,42 @@ echo __REACHED__"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *__REACHED__* ]]
 }
+
+# --- new: image (newest PHP patch + native-Linux UID remap) -------------------
+
+@test "new: default PHP is 8.4 (CLI and wizard share one constant)" {
+  [ "$WPSITE_NEW_PHP_DEFAULT" = "8.4" ]
+  ARGS="$BATS_TEST_TMPDIR/args"
+  _new_image() { echo "wp=$1 php=$2" > "$ARGS"; echo img; }
+  _ensure_base_layout() { die "stop here"; }   # everything after the image is out of scope
+  run cmd_new myshop
+  [ "$(cat "$ARGS")" = "wp= php=8.4" ]
+  run cmd_new myshop --php 8.3
+  [ "$(cat "$ARGS")" = "wp= php=8.3" ]
+}
+
+@test "_new_image: freshly pulled image goes through the host-UID remap" {
+  source "$REPO/lib/cmd_build.sh"
+  _wp_image_fresh()    { printf 'wordpress:php8.4-apache'; }
+  _resolve_wp_image()  { printf 'SHOULD-NOT-BE-USED'; }
+  _wp_image_for_host() { printf 'remapped:%s' "$1"; }
+  [ "$(_new_image "" 8.4)" = "remapped:wordpress:php8.4-apache" ]
+}
+
+@test "_new_image: nothing pullable -> offline resolver, still remapped" {
+  source "$REPO/lib/cmd_build.sh"
+  _wp_image_fresh()    { return 1; }
+  _resolve_wp_image()  { printf 'wordpress:latest'; }
+  _wp_image_for_host() { printf 'remapped:%s' "$1"; }
+  [ "$(_new_image "" 8.4 2>/dev/null)" = "remapped:wordpress:latest" ]
+}
+
+@test "_wp_image_for_host: native Linux derives a host-UID image; macOS keeps the base" {
+  source "$REPO/lib/cmd_build.sh"
+  id() { case "$1" in -u) echo 1000 ;; -g) echo 1000 ;; esac; }
+  docker() { case "$1" in image) return 1 ;; build) cat >/dev/null; return 0 ;; esac; }
+  uname() { echo Linux; }
+  [ "$(_wp_image_for_host wordpress:php8.4-apache 2>/dev/null)" = "wpsite/wordpress:php8.4-apache-u1000-g1000" ]
+  uname() { echo Darwin; }
+  [ "$(_wp_image_for_host wordpress:php8.4-apache)" = "wordpress:php8.4-apache" ]
+}

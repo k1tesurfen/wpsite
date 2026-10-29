@@ -13,6 +13,26 @@ _prompt() { # message default
   printf '%s' "${ans:-$def}"
 }
 
+# Default PHP series for a blank dev site: the newest series the plugin/theme ecosystem
+# runs cleanly on and hosts actually offer — not the newest release (8.5 still trips
+# premium plugins), and not one close to end of life (8.2 ends Dec 2026). Bump yearly.
+WPSITE_NEW_PHP_DEFAULT="8.4"
+
+# Image for a new dev site. The PHP version was chosen on purpose, so get its newest
+# patch (security releases land in the series tag) — not a stale cached copy. Offline
+# with nothing cached for the series → the offline-first resolution. Then the same
+# host-UID remap as build: on native Linux the bind-mounted wp-content belongs to the
+# host user, and a stock image's www-data (33) can't write it — no uploads, no plugin
+# installs, no debug.log. No-op on macOS. Run via $().
+_new_image() { # wp php
+  local wp="$1" php="$2" image
+  if ! image="$(_wp_image_fresh "$wp" "$php")"; then
+    log_warn "No PHP $php image could be pulled or found locally — using the closest available."
+    image="$(_resolve_wp_image "$wp" "$php")"
+  fi
+  _wp_image_for_host "$image"
+}
+
 cmd_new() {
   local name="" wp="" php="" host=""
   while [ $# -gt 0 ]; do
@@ -42,23 +62,17 @@ cmd_new() {
       break
     done
     wp="$(_prompt "WordPress version (blank = latest)" "$wp")"
-    php="$(_prompt "PHP version" "${php:-8.2}")"
+    php="$(_prompt "PHP version" "${php:-$WPSITE_NEW_PHP_DEFAULT}")"
     host="$(_prompt "Local host" "${host:-$name.$(config_dev_suffix)}")"
   fi
 
   _valid_site_name "$name" || die "Invalid site name '$name' (use lowercase letters, digits, hyphens)."
   if _name_taken "$name"; then die "'$name' already exists as a $(target_kind "$name" | grep . || echo "mandos client"). Choose another name."; fi
 
-  : "${php:=8.2}"
+  : "${php:=$WPSITE_NEW_PHP_DEFAULT}"
   : "${host:=$name.$(config_dev_suffix)}"
-  # The PHP version was chosen on purpose, so get its newest patch (security releases
-  # land in the series tag) — not whatever stale copy happens to be cached. Offline with
-  # nothing cached for the series → the old offline-first resolution.
   local image local_url
-  if ! image="$(_wp_image_fresh "$wp" "$php")"; then
-    log_warn "No PHP $php image could be pulled or found locally — using the closest available."
-    image="$(_resolve_wp_image "$wp" "$php")"
-  fi
+  image="$(_new_image "$wp" "$php")"
   local_url="http://$host"
 
   log_info "Creating dev site '$name'"

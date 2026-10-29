@@ -61,7 +61,7 @@ Commands:
   migrate-registry    One-off: move WordPress settings out of mandos into wpsite's own
           --apply         registry (dry run without --apply)
   new     [name]      Create a fresh blank dev site (no name → wizard)
-          --wp <ver> --php <X.Y> --host <h>   …pin versions / host (default latest/8.2);
+          --wp <ver> --php <X.Y> --host <h>   …pin versions / host (default latest/8.4);
                           always pulls the newest patch of the PHP series
   clone   <name> <devname>   Create a dev site from an ON-DISK backup (newest by
                       default; never takes a fresh one — run 'backup' first)

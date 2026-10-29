@@ -134,7 +134,7 @@ wpsite backup persist <client> <id> [--off]       # promote/demote a backup
 ```bash
 wpsite build   <client> [--backup <id>]    # (re)build replica from a backup (newest default)
 wpsite clone   <client> <devname> [--light|--backup <id>]   # dev site from a client
-wpsite new     [name] [--wp <ver>] [--php <X.Y>] [--host <h>]  # blank dev site (no name = wizard); pulls the PHP series' newest patch
+wpsite new     [name] [--wp <ver>] [--php <X.Y>] [--host <h>]  # blank dev site (no name = wizard); PHP default 8.4, pulls the series' newest patch
 wpsite php     <site> [<X.Y>]  # show the exact PHP a built site runs; with X.Y switch it (newest patch, keeps data + core;
                                # a client replica returns to production's PHP on its next build)
 wpsite start   <site>          # resume a stopped replica/dev site
