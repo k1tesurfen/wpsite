@@ -51,8 +51,14 @@ cmd_new() {
 
   : "${php:=8.2}"
   : "${host:=$name.$(config_dev_suffix)}"
+  # The PHP version was chosen on purpose, so get its newest patch (security releases
+  # land in the series tag) — not whatever stale copy happens to be cached. Offline with
+  # nothing cached for the series → the old offline-first resolution.
   local image local_url
-  image="$(_resolve_wp_image "$wp" "$php")"
+  if ! image="$(_wp_image_fresh "$wp" "$php")"; then
+    log_warn "No PHP $php image could be pulled or found locally — using the closest available."
+    image="$(_resolve_wp_image "$wp" "$php")"
+  fi
   local_url="http://$host"
 
   log_info "Creating dev site '$name'"
@@ -107,6 +113,8 @@ cmd_new() {
   done
 
   _ensure_wp_cli "$app_c" || die "Could not install wp-cli in $app_c; cannot install WordPress."
+  # php-wpsite.ini points sendmail_path at this shim — without it native mail() vanishes.
+  _install_sendmail_shim "$app_c"
 
   # Fresh install with the known dev admin (override via WPSITE_ADMIN_USER/_PASS).
   local login="${WPSITE_ADMIN_USER:-wpsite}" pass="${WPSITE_ADMIN_PASS:-wpsite}"
@@ -119,6 +127,7 @@ cmd_new() {
   # Blank slate: drop the default Hello-world post + sample/privacy pages.
   "${wpc[@]}" site empty --yes >/dev/null 2>&1 || log_warn "Could not clear default content."
 
+  log_ok "PHP $(_container_php_version "$app_c" | grep . || echo "$php")  ($image)"
   log_ok "Admin login: $login / $pass   →   $local_url/wp-admin/"
   log_ok "SUCCESS: $local_url is live (blank dev site)."
 }

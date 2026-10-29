@@ -45,6 +45,13 @@ _ms_pairs() { # sites.csv [devname]
 }
 
 # The multisite wp-config defines (unindented). DOMAIN_CURRENT_SITE = main local host.
+# COOKIE_DOMAIN = the requested host: on a SUBDOMAIN_INSTALL WordPress otherwise sets
+# it to ".<main domain>", so a subsite on its OWN mapped domain (schatz: 3 of 6) gets a
+# cookie for a foreign domain, the browser drops it, and wp-login dies "Cookies sind
+# gesperrt…" — frontend fine, backend unreachable. Production gets away with it via its
+# own wp-config/SSO plugin, which a replica doesn't carry. Host-only per site is right
+# locally (log in per site). isset() because WP-CLI has no HTTP_HOST. `$$` is Compose's
+# escape for a literal `$` — a bare `$_SERVER` would be interpolated away to nothing.
 _ms_config_extra() { # main_local_domain subdomain_install(0/1)
   local sub=false; [ "$2" = "1" ] && sub=true
   cat <<EOF
@@ -55,6 +62,7 @@ define('DOMAIN_CURRENT_SITE', '$1');
 define('PATH_CURRENT_SITE', '/');
 define('SITE_ID_CURRENT_SITE', 1);
 define('BLOG_ID_CURRENT_SITE', 1);
+define('COOKIE_DOMAIN', isset(\$\$_SERVER['HTTP_HOST']) ? \$\$_SERVER['HTTP_HOST'] : '');
 EOF
 }
 

@@ -61,7 +61,8 @@ Commands:
   migrate-registry    One-off: move WordPress settings out of mandos into wpsite's own
           --apply         registry (dry run without --apply)
   new     [name]      Create a fresh blank dev site (no name → wizard)
-          --wp <ver> --php <ver> --host <h>   …pin versions / host (default latest/8.2)
+          --wp <ver> --php <X.Y> --host <h>   …pin versions / host (default latest/8.2);
+                          always pulls the newest patch of the PHP series
   clone   <name> <devname>   Create a dev site from an ON-DISK backup (newest by
                       default; never takes a fresh one — run 'backup' first)
           --backup <id>      …use a specific backup
@@ -77,6 +78,9 @@ Commands:
   inject  <devsite>   Live-mount a local plugin into a dev site (default: ~/git/aule)
           --from <path> --slug <name>   …mount any plugin checkout under any slug
           --activate [--network]        …activate after mount (--network = multisite-wide)
+  php     <site> [X.Y]   Show the PHP version a built site runs; with X.Y switch it
+                      (pulls the series' newest patch, keeps data + WP core). A client
+                      replica returns to production's PHP on its next 'build'
   start   <site>      Start a stopped replica or dev site (keeps data)
   stop    <site>      Stop a running replica or dev site (keeps data, restartable)
           --all       …stop all running replicas + dev sites
@@ -167,6 +171,7 @@ main() {
     clone)   cmd_clone "$@" ;;
     push)    cmd_push "$@" ;;
     inject)  cmd_inject "$@" ;;
+    php)     cmd_php "$@" ;;
     start)   cmd_start "$@" ;;
     stop)    cmd_stop "$@" ;;
     upgrade) cmd_upgrade "$@" ;;

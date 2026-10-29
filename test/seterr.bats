@@ -400,3 +400,17 @@ out="$(_report_runs ghost applies)"; [ -z "$out" ]'
   [ "$status" -eq 0 ]
   [[ "$output" == *__REACHED__* ]]
 }
+
+@test "_php_keep_core / _php_show: nothing to do (no docker answer) -> do not abort" {
+  strict '
+    source "$REPO/lib/cmd_php.sh"
+    docker() { return 1; }
+    log_info() { :; }
+    f="$(mktemp)"; printf "services:\n  wordpress:\n    image: wordpress:php8.4-apache\n" > "$f"
+    _php_keep_core app ""
+    _php_keep_core app 7.0.1
+    _php_show site app "$f"
+  '
+  [ "$status" -eq 0 ]
+  [[ "$output" == *__REACHED__* ]]
+}

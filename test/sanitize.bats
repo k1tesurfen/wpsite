@@ -131,3 +131,23 @@ setup() {
   [ "$status" -eq 0 ]
   [ ! -s "$RAN" ]                          # the UPDATE/DELETE exec never ran
 }
+
+@test "compose: multisite sets a host-only COOKIE_DOMAIN that survives Compose interpolation" {
+  source "$REPO/lib/cmd_build_multisite.sh"
+  run _render_compose db app img acme main.test "$(_ms_config_extra main.test 1)"
+  [[ "$output" == *"define('DOMAIN_CURRENT_SITE', 'main.test');"* ]]
+  # $$ in the YAML = a literal $ after Compose interpolation.
+  [[ "$output" == *"define('COOKIE_DOMAIN', isset(\$\$_SERVER['HTTP_HOST']) ? \$\$_SERVER['HTTP_HOST'] : '');"* ]]
+  if command -v docker >/dev/null && docker compose version >/dev/null 2>&1; then
+    d="$BATS_TEST_TMPDIR/c"; mkdir -p "$d"; printf '%s\n' "$output" > "$d/docker-compose.yml"
+    run docker compose -f "$d/docker-compose.yml" config
+    # (config re-escapes $ as $$ in its output; an UNescaped $_SERVER would be gone.)
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"_SERVER['HTTP_HOST']) ?"* ]]
+  fi
+}
+
+@test "compose: single site gets no COOKIE_DOMAIN" {
+  run _render_compose db app img acme acme.test
+  [[ "$output" != *COOKIE_DOMAIN* ]]
+}

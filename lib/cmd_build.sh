@@ -191,6 +191,51 @@ _resolve_wp_image() { # wp php
   printf '%s' "$fallback"
 }
 
+# Freshest image for a PHP series — for `new` and `wpsite php`, where the user CHOSE the
+# PHP version. The series tags (wordpress:php8.4-apache) are rebuilt upstream for every
+# PHP patch release, but _resolve_wp_image prefers an image already on this machine, so
+# a months-old pull keeps a patch level that predates a security release (gruenert ran
+# 8.2.32 while 8.2.35 fixed two RCEs). So this PULLS, and only tries candidates that pin
+# the requested series: a PHP-less fallback (wordpress:latest) would quietly run a
+# different PHP. Not found → next candidate; any other pull error (offline, Docker Hub
+# rate limit) → the first such candidate already on this machine, with a warning that
+# its patch level may be stale. Prints the tag; returns 1 when nothing usable exists.
+# NOT used by build/clone: a replica mirrors production's PHP series, and those keep
+# _resolve_wp_image's offline-first behaviour. Run via $().
+_wp_image_fresh() { # wp php
+  local wp="$1" php="$2" tag err cands=()
+  [ -n "$php" ] || return 1
+  while IFS= read -r tag; do
+    case "$tag" in *"php${php}-"*) cands+=("$tag") ;; esac
+  done < <(_wp_image_candidates "$wp" "$php")
+  [ "${#cands[@]}" -gt 0 ] || return 1
+
+  log_info "Pulling the newest PHP $php image..."
+  for tag in "${cands[@]}"; do
+    if err="$(docker pull -q "$tag" 2>&1 >/dev/null)"; then
+      printf '%s' "$tag"; return 0
+    fi
+    case "$err" in
+      *"no such manifest"*|*"manifest unknown"*|*"not found"*|*"no such image"*|*"does not exist"*)
+        ;;                                  # tag not published -> try the next candidate
+      *) log_warn "Cannot pull $tag (${err%%$'\n'*})."; break ;;
+    esac
+  done
+  for tag in "${cands[@]}"; do
+    if docker image inspect "$tag" >/dev/null 2>&1; then
+      log_warn "Using the cached $tag — its PHP patch level may predate the newest release."
+      printf '%s' "$tag"; return 0
+    fi
+  done
+  return 1
+}
+
+# The exact PHP version a running app container executes (e.g. 8.4.27). Empty when the
+# container isn't running. Run via $().
+_container_php_version() { # app_container
+  docker exec "$1" php -r 'echo PHP_VERSION;' 2>/dev/null | tr -d '\r' || true
+}
+
 # --- Host-matched WordPress image (native-Linux bind-mount ownership) -------------
 #
 # _render_compose bind-mounts ./wp-content into the container. On macOS, Docker
